@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Results (large binary files)
+results/*.obj
+results/*.df
+results/*.zip
+
+# Figures (regenerable)
+figures/*.png
+figures/*.pdf
+figures/*.svg
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment
+.env
+*.log
