@@ -20,7 +20,8 @@ anc_sti_screening/
 ├── model.py                   Sim construction (make_sim, make_diseases, make_hiv_intvs)
 ├── interventions.py           SyndromicMgmt (VDS/UDS) + ANCScreen intervention
 ├── analyzers.py               total_symptomatic, pregnancy_sti_stats
-├── adverse_outcomes.py        DALY attribution / adverse birth outcome estimation
+├── fetal_health.py            FetalHealth module: dynamic birth weight + PTB modeling
+├── connectors.py              sti_fetal connector: routes infections/treatments to FetalHealth
 ├── utils.py                   Plotting helpers, scenario definitions
 ├── run_calibrations.py        Optuna calibration (v15 API, dot notation)
 ├── run_msim.py                Multi-sim with top calibrated parameter sets
@@ -39,7 +40,7 @@ anc_sti_screening/
    plot_sti_epi.py         Validate STI fit (prevalence by age/sex + time series)
    plot_network.py         Validate network structure
 4. run_scenarios.py        Compare SOC vs ANC screening scenarios
-5. adverse_outcomes.py     Estimate adverse birth outcomes averted + DALYs
+                           FetalHealth module dynamically tracks birth outcomes
 ```
 
 ## Scenarios

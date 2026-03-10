@@ -15,6 +15,8 @@ import stisim as sti
 
 from interventions import make_testing
 from analyzers import make_analyzers
+from fetal_health import FetalHealth
+from connectors import sti_fetal
 
 # Constants
 LOCATION = 'zimbabwe'
@@ -145,14 +147,18 @@ def make_sim(scenario='soc', seed=1, start=1990, stop=2030, n_agents=None, debug
     # Diseases and connectors
     diseases, connectors = make_diseases()
 
+    # Fetal health module + connector
+    fetal_health = FetalHealth()
+    connectors.append(sti_fetal())
+
     # Interventions: HIV + STI testing
     hiv_intvs = make_hiv_intvs()
     ng, ct, tv, bv = diseases[1], diseases[2], diseases[3], diseases[4]
     sti_intvs = make_testing(ng, ct, tv, bv, scenario=scenario, stop=stop)
     interventions = hiv_intvs + sti_intvs
 
-    # Analyzers
-    analyzers = make_analyzers(extra_analyzers=analyzers)
+    # Analyzers (includes FetalHealth module for birth outcome tracking)
+    analyzers = make_analyzers(extra_analyzers=sc.mergelists(fetal_health, analyzers))
 
     # Build sim
     simpars = dict(
