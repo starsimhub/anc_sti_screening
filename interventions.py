@@ -2,8 +2,9 @@
 Interventions for the ANC STI screening model.
 
 Contains:
-    - SyndromicMgmt: syndromic management of VDS/UDS (from stisim_vddx_zim)
-    - ANCScreen: ANC-based screening for asymptomatic STIs during pregnancy
+    - SyndromicMgmt: syndromic management of VDS/UDS
+    - ANCScreen: GA-windowed ANC screening for asymptomatic STIs
+    - STIPartnerNotification: notify/treat partners of ANC-positive women
     - make_testing: factory function to assemble all STI interventions
 """
 
@@ -214,8 +215,9 @@ class ANCScreen(sti.STITest):
     """
     ANC-based screening for asymptomatic STIs during pregnancy.
 
-    Screens pregnant women at their first ANC visit for NG, CT, TV
-    (and optionally BV). Positive results are routed to treatment.
+    Screens pregnant women for NG, CT, TV (and optionally BV) within a
+    gestational age window. Multiple instances can be used for timed
+    screens (e.g. enrollment ≤24w + third-trimester 32-34w).
 
     Args:
         diseases (list):               disease modules to screen for
@@ -225,11 +227,14 @@ class ANCScreen(sti.STITest):
         screen_prob (float/array):     probability of being screened at ANC
         screen_prob_data (array):      time-varying screening probability
         years (array):                 years corresponding to screen_prob_data
+        ga_min (float):                minimum gestational age (weeks) for eligibility
+        ga_max (float):                maximum gestational age (weeks) for eligibility
     """
 
     def __init__(self, pars=None, diseases=None, treatments=None,
                  disease_treatment_map=None, test_sensitivity=None,
                  screen_prob=None, screen_prob_data=None,
+                 ga_min=None, ga_max=None,
                  years=None, start=None, stop=None,
                  name=None, label=None, **kwargs):
         super().__init__(years=years, start=start, stop=stop, name=name, label=label)
@@ -249,6 +254,10 @@ class ANCScreen(sti.STITest):
         if test_sensitivity is None:
             test_sensitivity = {d.name: 1.0 for d in self.diseases}
         self.test_sensitivity = test_sensitivity
+
+        # GA window for eligibility (in weeks); None means no constraint
+        self.ga_min = ga_min
+        self.ga_max = ga_max
 
         # Distribution for sensitivity sampling
         self._sens_dist = ss.bernoulli(p=0.5)
@@ -290,7 +299,7 @@ class ANCScreen(sti.STITest):
             return
 
         # Identify pregnant women eligible for screening
-        # Pregnant women who haven't been screened this pregnancy
+        # Pregnant women who haven't been screened this pregnancy (by this instance)
         pregnant = ppl.pregnancy.pregnant
         never_tested = np.isnan(self.ti_tested.values)
         tested_before_this_pregnancy = self.ti_tested < ppl.pregnancy.ti_pregnant
@@ -300,6 +309,19 @@ class ANCScreen(sti.STITest):
             return
 
         eligible_uids = eligible.uids
+
+        # Filter by gestational age window (in weeks) if specified
+        if self.ga_min is not None or self.ga_max is not None:
+            ga_weeks = np.asarray(ppl.pregnancy.gestation[eligible_uids], dtype=float)
+            in_window = np.ones(len(eligible_uids), dtype=bool)
+            if self.ga_min is not None:
+                in_window &= ga_weeks >= self.ga_min
+            if self.ga_max is not None:
+                in_window &= ga_weeks <= self.ga_max
+            eligible_uids = eligible_uids[in_window]
+
+        if len(eligible_uids) == 0:
+            return
 
         # Determine who gets screened based on probability
         if self._screen_prob_interp is not None:
@@ -364,6 +386,103 @@ class ANCScreen(sti.STITest):
         return
 
 
+# %% Partner notification
+class STIPartnerNotification(ss.Intervention):
+    """
+    Notify and treat sexual partners of women testing positive at ANC.
+
+    When a woman tests positive for an STI at ANC screening, her current
+    sexual partner(s) are identified via the network and probabilistically
+    notified and treated. This reduces reinfection risk between screens.
+
+    Args:
+        p_partner_tx (float):   probability that a partner is successfully
+                                notified AND treated (default 0.3)
+        anc_screens (list):     names of ANCScreen interventions to monitor
+        treatments (list):      treatment modules to apply to partners
+        disease_treatment_map:  maps disease name → treatment module
+    """
+
+    def __init__(self, p_partner_tx=0.3, anc_screens=None,
+                 treatments=None, disease_treatment_map=None,
+                 name=None, label=None, start=None, **kwargs):
+        super().__init__(name=name, label=label, **kwargs)
+        self.define_pars(
+            p_notify_treat=ss.bernoulli(p=p_partner_tx),
+        )
+        self.anc_screen_names = anc_screens or ['anc_enroll', 'anc_tri3']
+        self.treatments = treatments or []
+        self.disease_treatment_map = disease_treatment_map or {}
+        self.start = start
+
+        self.define_states(
+            ss.FloatArr('ti_notified', label='Time partner was notified'),
+        )
+        return
+
+    def init_pre(self, sim):
+        super().init_pre(sim)
+        if self.start is None:
+            self.start = sim.t.yearvec[0]
+
+    def init_results(self):
+        super().init_results()
+        self.define_results(
+            ss.Result('n_index_cases',      dtype=int, label='Index cases (ANC positive)'),
+            ss.Result('n_partners_found',   dtype=int, label='Partners identified'),
+            ss.Result('n_partners_treated', dtype=int, label='Partners notified & treated'),
+        )
+
+    def step(self):
+        sim = self.sim
+        ti = self.ti
+
+        if sim.now < self.start:
+            return
+
+        # Find women who just tested positive at any ANC screen this timestep
+        index_uids = ss.uids()
+        for screen_name in self.anc_screen_names:
+            anc = sim.interventions.get(screen_name)
+            if anc is None:
+                continue
+            # Women screened this timestep who tested positive for any disease
+            just_screened = anc.ti_tested == ti
+            for disease in anc.diseases:
+                positive = just_screened & disease.infected
+                index_uids = index_uids | positive.uids
+
+        if len(index_uids) == 0:
+            return
+
+        self.results['n_index_cases'][ti] = len(index_uids)
+
+        # Find current sexual partners via network
+        nw = sim.networks.structuredsexual
+        partners = nw.find_contacts(index_uids, as_array=False)
+        partners = ss.uids(partners)
+
+        self.results['n_partners_found'][ti] = len(partners)
+
+        if len(partners) == 0:
+            return
+
+        # Probabilistically notify and treat
+        treated_partners = self.pars.p_notify_treat.filter(partners)
+        self.ti_notified[treated_partners] = ti
+        self.results['n_partners_treated'][ti] = len(treated_partners)
+
+        # Route to treatment — treat for all diseases the index was positive for
+        if len(treated_partners):
+            for dname, tx in self.disease_treatment_map.items():
+                # Treat partners who are infected (even if asymptomatic)
+                infected_partners = treated_partners[sim.diseases[dname].infected[treated_partners]]
+                if len(infected_partners):
+                    tx.eligibility = tx.eligibility | infected_partners
+
+        return
+
+
 # %% Factory functions
 def seeking_care_vds(sim):
     """ Eligibility: women with symptomatic vaginal discharge seeking care """
@@ -397,7 +516,10 @@ def make_testing(ng, ct, tv, bv, scenario='soc', stop=2040):
 
     Scenarios:
         soc:        syndromic management only (standard of care)
-        anc_screen: syndromic management + ANC screening for NG/CT/TV
+        enroll:     single enrollment screen (≤24w GA)
+        tri3:       single third-trimester screen (32-34w GA)
+        twice:      both screens (PROMISE trial design)
+        partner_tx: both screens + partner notification/treatment
     """
     # Treatments
     ng_tx = sti.GonorrheaTreatment(
@@ -440,60 +562,53 @@ def make_testing(ng, ct, tv, bv, scenario='soc', stop=2040):
 
     intvs = [syndromic_vds, syndromic_uds, ng_tx, ct_tx, metronidazole]
 
-    # ANC screening scenarios — mapped to research questions:
-    #   RQ1 (timing):    anc_early vs anc_late vs anc_twice
-    #   RQ2 (targeting): anc_universal vs anc_targeted (age-based)
-    #   RQ3 (pathogen):  anc_ng_only, anc_ng_ct, anc_all
-    #   RQ4 (bundling):  anc_partner_tx (adds partner notification)
+    # ANC screening scenarios — mapped to PROMISE trial design:
+    #   soc:         syndromic management only (standard of care)
+    #   enroll:      single enrollment screen (≤24w)
+    #   tri3:        single third-trimester screen (32-34w)
+    #   twice:       both enrollment + third-trimester screens (PROMISE design)
+    #   partner_tx:  twice + partner notification/treatment
 
     disease_treatment_map = {'ng': ng_tx, 'ct': ct_tx, 'tv': metronidazole}
     default_sensitivity  = {'ng': 0.95, 'ct': 0.95, 'tv': 0.90}
     intv_year = 2027
 
-    # --- Standard ANC screening: single screen at first ANC visit ---
-    if scenario in ['anc_screen', 'anc_all', 'anc_universal']:
-        anc = ANCScreen(
-            name='anc_screen', label='anc_screen',
+    def _make_anc_screen(name, ga_min=None, ga_max=None):
+        return ANCScreen(
+            name=name, label=name,
             start=intv_year,
             diseases=[ng, ct, tv],
             treatments=treatments,
             disease_treatment_map=disease_treatment_map,
             screen_prob=0.5,
             test_sensitivity=default_sensitivity,
+            ga_min=ga_min, ga_max=ga_max,
         )
-        intvs.append(anc)
 
-    # --- RQ1: Timing — early (1st trimester) vs late (3rd trimester) vs twice ---
-    # "Early" and "late" are handled identically by the model since ANCScreen
-    # triggers on any pregnant woman not yet screened this pregnancy. The
-    # difference is in the trimester eligibility filter, which we add here
-    # as a demonstration. Actual trimester-specific eligibility will be
-    # refined once we confirm how PROMISE defines its two visits.
+    if scenario == 'enroll':
+        # Single enrollment screen: ≤24 weeks GA
+        intvs.append(_make_anc_screen('anc_enroll', ga_max=24))
 
-    # --- RQ3: Pathogen priority — screen only NG, or NG+CT ---
-    elif scenario == 'anc_ng_only':
-        anc = ANCScreen(
-            name='anc_screen', label='anc_screen',
-            start=intv_year,
-            diseases=[ng],
-            treatments=[ng_tx],
-            disease_treatment_map={'ng': ng_tx},
-            screen_prob=0.5,
-            test_sensitivity={'ng': 0.95},
-        )
-        intvs.append(anc)
+    elif scenario == 'tri3':
+        # Single third-trimester screen: ≥28 weeks GA (third trimester)
+        intvs.append(_make_anc_screen('anc_tri3', ga_min=28))
 
-    elif scenario == 'anc_ng_ct':
-        anc = ANCScreen(
-            name='anc_screen', label='anc_screen',
-            start=intv_year,
-            diseases=[ng, ct],
-            treatments=[ng_tx, ct_tx],
-            disease_treatment_map={'ng': ng_tx, 'ct': ct_tx},
-            screen_prob=0.5,
-            test_sensitivity={'ng': 0.95, 'ct': 0.95},
-        )
-        intvs.append(anc)
+    elif scenario in ['twice', 'partner_tx']:
+        # PROMISE design: enrollment (≤24w) + third-trimester (≥28w)
+        # Each instance has its own ti_tested, so women are screened once per visit
+        intvs.append(_make_anc_screen('anc_enroll', ga_max=24))
+        intvs.append(_make_anc_screen('anc_tri3', ga_min=28))
+
+        if scenario == 'partner_tx':
+            pn = STIPartnerNotification(
+                name='partner_notif', label='partner_notif',
+                p_partner_tx=0.3,
+                anc_screens=['anc_enroll', 'anc_tri3'],
+                treatments=treatments,
+                disease_treatment_map=disease_treatment_map,
+                start=intv_year,
+            )
+            intvs.append(pn)
 
     # soc: no ANC screening (default — intvs unchanged)
 

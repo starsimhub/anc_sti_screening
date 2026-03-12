@@ -148,7 +148,16 @@ def make_sim(scenario='soc', seed=1, start=1990, stop=2030, n_agents=None, debug
     diseases, connectors = make_diseases()
 
     # Fetal health module + connector
-    fetal_health = FetalHealth()
+    # Check if a custom FetalHealth was passed in analyzers
+    has_custom_fh = False
+    if analyzers is not None:
+        for a in sc.tolist(analyzers):
+            if isinstance(a, FetalHealth):
+                has_custom_fh = True
+                break
+    if not has_custom_fh:
+        fetal_health = FetalHealth()
+        analyzers = sc.mergelists(fetal_health, analyzers)
     connectors.append(sti_fetal())
 
     # Interventions: HIV + STI testing
@@ -157,8 +166,8 @@ def make_sim(scenario='soc', seed=1, start=1990, stop=2030, n_agents=None, debug
     sti_intvs = make_testing(ng, ct, tv, bv, scenario=scenario, stop=stop)
     interventions = hiv_intvs + sti_intvs
 
-    # Analyzers (includes FetalHealth module for birth outcome tracking)
-    analyzers = make_analyzers(extra_analyzers=sc.mergelists(fetal_health, analyzers))
+    # Analyzers
+    analyzers = make_analyzers(extra_analyzers=analyzers)
 
     # Build sim
     simpars = dict(

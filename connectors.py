@@ -36,11 +36,18 @@ class sti_fetal(ss.Connector):
             treatment_disease_map = {
                 'ng_tx':         'ng',
                 'ct_tx':         'ct',
-                'metronidazole': 'tv',  # TV is the primary target for fetal effects
+                'metronidazole': 'tv',
             }
         self.treatment_disease_map = treatment_disease_map
 
         return
+
+    def _get_ga_weeks(self, uids):
+        """Compute gestational age in weeks for pregnant UIDs."""
+        preg = self.sim.people.pregnancy
+        dt_years = float(self.sim.pars.dt)
+        ga_ts = self.sim.ti - np.array(preg.ti_pregnant[uids], dtype=float)
+        return ga_ts * dt_years * 365.25 / 7
 
     def step(self):
         sim = self.sim
@@ -80,7 +87,6 @@ class sti_fetal(ss.Connector):
             except (KeyError, AttributeError):
                 continue
 
-            # Check if treatment has a ti_treated state
             if not hasattr(tx, 'ti_treated'):
                 continue
 
@@ -90,6 +96,7 @@ class sti_fetal(ss.Connector):
             if len(treated_pregnant):
                 dname = self.treatment_disease_map.get(tx_name)
                 if dname:
-                    fh.apply_treatment_effects(treated_pregnant, dname)
+                    ga_weeks = self._get_ga_weeks(treated_pregnant)
+                    fh.apply_treatment_effects(treated_pregnant, dname, ga_weeks=ga_weeks)
 
         return

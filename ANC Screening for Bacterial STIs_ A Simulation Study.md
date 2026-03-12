@@ -29,7 +29,14 @@ Interim simulation results should be presented at appropriate scientific conveni
 
 This simulation study aims to create a genuine research partnership between empirical and modeling approaches, where each informs and strengthens the other. 
 
+## Study design
+
+PROMISE will recruit 12,780 women (6,390 per arm). The PROMISE trial will be conducted in Harare, Zimbabwe and recruiting from 15 antenatal clinics. The intervention will consist of testing for Ct, Ng, Tv, integrated with HIV and syphilis testing, at two points during a woman’s pregnancy (enrolment [≤24weeks’ gestation], and during the third trimester [32-34 weeks’ gestation]). STI treatment and management in the intervention arm will be based on the test result if asymptomatic; women with symptoms will be treated following syndromic management guidelines. Management will include partner notification and treatment. The primary outcome (composite outcome of LBW, preterm birth, and stillbirth) will be assessed at a birth visit occurring within 72 hours of birth. Children and mothers will be followed up at 1- and 6-weeks postnatal to access secondary outcomes (small vulnerable newborn, small for gestational age, early and late neonatal death <7 and <28 days; neonatal conjunctivitis, pneumonia, sepsis, and prevalence of untreated STIs among mothers).
+
+PROMISE will investigate the cost-effectiveness of the antenatal STI screening strategy and conduct a process evaluation to understand the operational and structural factors required for scalability.
+
 ## **Research Questions**
+
 
 1. **Optimal timing** When during pregnancy should screening occur to maximize health benefits?  
 2. **Targeted versus universal screening** Can screening be effectively targeted to higher-risk populations based on age or geographic location, or should it remain universal?  

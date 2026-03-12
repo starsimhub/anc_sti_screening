@@ -8,20 +8,22 @@ affect delivery timing (preterm birth) and fetal size (LBW/SGA).
 Design:
     - Each pregnancy gets a baseline fetal weight percentile (individual heterogeneity)
     - Infections apply damage via two separate levers:
-        1. Delivery timing: bring ti_delivery forward (PTB risk) — one-way ratchet
+        1. Delivery timing: bring ti_delivery forward (PTB risk)
         2. Growth restriction: accumulate growth penalty — partially reversible by treatment
-    - Treatment partially reverses growth restriction but leaves a residual
+    - Treatment partially reverses both growth restriction and delivery timing shift,
+      with the degree of reversal depending on gestational age at treatment (early vs late)
     - Reinfection compounds the damage
     - At delivery, birth weight is computed from gestational age + percentile + restriction
     - Outcomes classified: preterm (<37w), LBW (<2500g), SGA (<10th percentile for GA)
 
-Usage:
-    Module is added to the sim like any other module. It listens for infections
-    and treatments via apply_infection_effects() and apply_treatment_effects(),
-    which should be called from connectors or disease/intervention step methods.
+Parameters:
+    All mechanistic birth outcome parameters (delivery timing shifts, growth penalties,
+    treatment reversibility) are accepted via pars and can be varied across VoI draws.
+    See priors.py and promise-voi-plan-2.md Section 3b-3d for definitions and priors.
 
-    fh = FetalHealth()
-    sim = sti.Sim(..., analyzers=[fh])  # Or add as a module
+Usage:
+    fh = FetalHealth(ptb_shift_mean=dict(ng=2.0, ct=1.5, tv=1.0), ...)
+    sim = sti.Sim(..., analyzers=[fh])
 """
 
 import numpy as np
@@ -45,37 +47,9 @@ WEIGHT_GRAMS = np.array(list(WEIGHT_BY_GA.values()), dtype=float)
 # 10th percentile ratio (for SGA classification) — approximately 0.80 of median
 SGA_RATIO = 0.80
 
-# Relative risks of preterm birth by disease
-# These determine how much ti_delivery is shifted forward
-# Source: DALY attribution parameters doc
-RR_PTB = sc.objdict(
-    ng=1.5,   # Vallely 2021, Taylor 2023
-    ct=1.3,   # He 2020, Olson-Chen 2018
-    tv=1.3,   # Silver 2014
-    bv=1.0,   # Not modeled for PTB currently
-)
-
-# Growth restriction severity by disease (fractional reduction in weight)
-# Applied as a multiplier: effective_weight *= (1 - growth_penalty)
-GROWTH_PENALTY = sc.objdict(
-    ng=0.08,  # NG → ~8% weight reduction (maps to 22.3% LBW rate)
-    ct=0.03,  # CT → ~3% weight reduction (maps to 2.7% LBW rate)
-    tv=0.03,  # TV → ~3% weight reduction (maps to 2.7% SGA rate)
-    bv=0.0,
-)
-
-# What fraction of growth penalty persists after successful treatment
-# 0.0 = full recovery, 1.0 = treatment has no effect on growth
-TREATMENT_RESIDUAL = 0.3
-
-# PTB: mean weeks brought forward on infection
-PTB_SHIFT_MEAN = sc.objdict(
-    ng=2.0,   # NG: mean 2 weeks earlier
-    ct=1.5,   # CT: mean 1.5 weeks earlier
-    tv=1.0,   # TV: mean 1 week earlier
-    bv=0.0,
-)
-PTB_SHIFT_STD = 1.0  # Standard deviation of shift (weeks)
+# GA cutoff (weeks) for early vs late treatment reversibility
+# Corresponds to PROMISE enrollment screen (≤24w) vs third-trimester screen (32-34w)
+EARLY_LATE_GA_CUTOFF = 24.0
 
 
 # %% Module
@@ -90,23 +64,36 @@ class FetalHealth(ss.Module):
     def __init__(self, pars=None, **kwargs):
         super().__init__(name='fetal_health')
         self.define_pars(
-            rr_ptb=RR_PTB,
-            growth_penalty=GROWTH_PENALTY,
-            treatment_residual=TREATMENT_RESIDUAL,
-            ptb_shift_mean=PTB_SHIFT_MEAN,
-            ptb_shift_std=PTB_SHIFT_STD,
+            # Delivery timing shift: mean weeks brought forward per infection
+            ptb_shift_mean=sc.objdict(ng=2.0, ct=1.5, tv=1.0, bv=0.0),
+            ptb_shift_std=1.0,
+
+            # Growth restriction: fractional weight reduction per infection
+            growth_penalty=sc.objdict(ng=0.08, ct=0.03, tv=0.03, bv=0.0),
+
+            # Treatment reversibility — fraction of damage PERSISTING after treatment
+            # Split by early (≤24w GA) vs late (>24w GA)
+            tx_residual_growth_early=0.33,   # Growth penalty residual, early treatment
+            tx_residual_growth_late=0.50,    # Growth penalty residual, late treatment
+            tx_residual_timing_early=0.50,   # Delivery shift residual, early treatment
+            tx_residual_timing_late=0.71,    # Delivery shift residual, late treatment
+
+            # GA cutoff for early vs late (weeks)
+            early_late_cutoff=EARLY_LATE_GA_CUTOFF,
+
+            # Classification thresholds
             sga_ratio=SGA_RATIO,
-            lbw_threshold=2500,  # grams
+            lbw_threshold=2500,   # grams
             preterm_threshold=37, # weeks
         )
         self.update_pars(pars, **kwargs)
 
         self.define_states(
             # Maternal states (set during pregnancy)
-            ss.FloatArr('weight_percentile', label='Fetal weight percentile'),      # Baseline heterogeneity (drawn at conception)
-            ss.FloatArr('growth_restriction', label='Cumulative growth restriction'), # Accumulated damage from infections
-            ss.FloatArr('n_infections_in_preg', label='Infections during pregnancy'), # Count of infection events this pregnancy
-            ss.FloatArr('ti_ptb_shift', label='Last PTB shift time'),                # Track when last shift was applied
+            ss.FloatArr('weight_percentile', label='Fetal weight percentile'),
+            ss.FloatArr('growth_restriction', label='Cumulative growth restriction'),
+            ss.FloatArr('n_infections_in_preg', label='Infections during pregnancy'),
+            ss.FloatArr('timing_shift_applied', label='Total delivery shift applied (timesteps)'),
 
             # Newborn states (set at delivery)
             ss.FloatArr('birth_weight', label='Birth weight (grams)'),
@@ -135,19 +122,27 @@ class FetalHealth(ss.Module):
         )
         return
 
+    def _get_ga_weeks(self, uids):
+        """Get current gestational age in weeks for given UIDs."""
+        preg = self.sim.people.pregnancy
+        dt_years = float(self.sim.pars.dt)
+        ga_ts = self.ti - np.array(preg.ti_pregnant[uids], dtype=float)
+        return ga_ts * dt_years * 365.25 / 7
+
+    def _ts_per_week(self):
+        """Conversion factor: timesteps per week."""
+        dt_years = float(self.sim.pars.dt)
+        return 1.0 / (dt_years * 365.25 / 7)
+
     def on_conception(self, uids):
         """
         Called when women become pregnant. Sets baseline fetal weight percentile
         and resets pregnancy-specific states.
-
-        Should be called from the Pregnancy module or via a hook.
         """
-        # Draw baseline weight percentile — log-normal around 1.0
-        # This captures individual heterogeneity in fetal growth
         self.weight_percentile[uids] = np.random.lognormal(mean=0, sigma=0.1, size=len(uids))
         self.growth_restriction[uids] = 0.0
         self.n_infections_in_preg[uids] = 0
-        self.ti_ptb_shift[uids] = np.nan
+        self.timing_shift_applied[uids] = 0.0
 
         # Check for pre-existing infections and apply effects
         for dname in ['ng', 'ct', 'tv']:
@@ -165,9 +160,6 @@ class FetalHealth(ss.Module):
         """
         Apply adverse effects of a new STI infection on fetal health.
 
-        Called when a pregnant woman becomes infected (or is already infected
-        at conception). Modifies both delivery timing and growth.
-
         Args:
             mother_uids (ss.uids): UIDs of infected pregnant women
             disease_name (str):    'ng', 'ct', or 'tv'
@@ -180,33 +172,30 @@ class FetalHealth(ss.Module):
         if len(pregnant_uids) == 0:
             return
 
-        # --- Lever 1: Delivery timing (PTB) — one-way ratchet ---
+        # --- Lever 1: Delivery timing shift ---
         shift_mean = self.pars.ptb_shift_mean.get(disease_name, 0)
         if shift_mean > 0:
-            # Convert weeks to timesteps
-            dt_years = float(sim.pars.dt)
-            ts_per_week = 1.0 / (dt_years * 365.25 / 7)  # timesteps per week
-            shift_mean_ts = shift_mean * ts_per_week
-            shift_std_ts  = float(self.pars.ptb_shift_std) * ts_per_week
+            ts_per_wk = self._ts_per_week()
+            shift_mean_ts = shift_mean * ts_per_wk
+            shift_std_ts  = float(self.pars.ptb_shift_std) * ts_per_wk
             self._ptb_shift_dist.set(mean=shift_mean_ts, std=shift_std_ts)
             shifts = self._ptb_shift_dist.rvs(pregnant_uids)
 
             # Bring delivery forward but don't go below 24 weeks gestation
-            min_dur_ts = 24 * ts_per_week  # 24 weeks in timesteps
+            min_dur_ts = 24 * ts_per_wk
             new_delivery = np.array(preg.ti_delivery[pregnant_uids], dtype=float) - shifts
             min_delivery_ti = np.array(preg.ti_pregnant[pregnant_uids], dtype=float) + min_dur_ts
             new_delivery = np.maximum(new_delivery, min_delivery_ti)
 
             # One-way ratchet: only bring forward, never push back
             current_delivery = np.array(preg.ti_delivery[pregnant_uids], dtype=float)
+            actually_shifted = np.maximum(0, current_delivery - new_delivery)
             preg.ti_delivery[pregnant_uids] = np.minimum(current_delivery, new_delivery)
-            self.ti_ptb_shift[pregnant_uids] = self.ti
+            self.timing_shift_applied[pregnant_uids] += actually_shifted
 
         # --- Lever 2: Growth restriction — cumulative ---
         penalty = self.pars.growth_penalty.get(disease_name, 0)
         if penalty > 0:
-            # Compound: each infection adds penalty on remaining capacity
-            # So first infection: 0 → 0.08, second: 0.08 → 0.08 + 0.92*0.08 = 0.154
             current = self.growth_restriction[pregnant_uids]
             self.growth_restriction[pregnant_uids] = current + (1 - current) * penalty
 
@@ -214,31 +203,66 @@ class FetalHealth(ss.Module):
 
         return
 
-    def apply_treatment_effects(self, mother_uids, disease_name):
+    def apply_treatment_effects(self, mother_uids, disease_name, ga_weeks=None):
         """
-        Partially reverse growth restriction when an infection is treated.
+        Partially reverse damage when an infection is treated during pregnancy.
 
-        Treatment reduces the growth penalty but leaves a residual, reflecting
-        that even treated infections may have lasting effects on fetal growth.
-        Does NOT reverse PTB shift (one-way ratchet).
+        Both growth restriction and delivery timing shift can be partially reversed,
+        with the degree depending on gestational age at treatment (early vs late).
 
         Args:
             mother_uids (ss.uids): UIDs of treated pregnant women
             disease_name (str):    'ng', 'ct', or 'tv'
+            ga_weeks (np.ndarray): gestational age in weeks at treatment for each uid.
+                                   If None, computed from current sim time.
         """
         preg = self.sim.people.pregnancy
         pregnant_uids = mother_uids[preg.pregnant[mother_uids]]
         if len(pregnant_uids) == 0:
             return
 
-        penalty = self.pars.growth_penalty.get(disease_name, 0)
-        residual = self.pars.treatment_residual
+        # Compute GA if not provided
+        if ga_weeks is None:
+            ga_weeks = self._get_ga_weeks(pregnant_uids)
 
-        # Remove the reversible portion of the most recent penalty
-        # Residual fraction stays (e.g., 30% of the penalty persists)
-        reversible = penalty * (1 - residual)
-        current = self.growth_restriction[pregnant_uids]
-        self.growth_restriction[pregnant_uids] = np.maximum(0, current - reversible)
+        cutoff = self.pars.early_late_cutoff
+        is_early = ga_weeks <= cutoff
+
+        # --- Growth restriction reversal ---
+        penalty = self.pars.growth_penalty.get(disease_name, 0)
+        if penalty > 0:
+            # Select residual based on early/late
+            residual = np.where(
+                is_early,
+                self.pars.tx_residual_growth_early,
+                self.pars.tx_residual_growth_late,
+            )
+            reversible = penalty * (1 - residual)
+            current = np.array(self.growth_restriction[pregnant_uids], dtype=float)
+            self.growth_restriction[pregnant_uids] = np.maximum(0, current - reversible)
+
+        # --- Delivery timing reversal (relaxing the ratchet) ---
+        timing_residual = np.where(
+            is_early,
+            self.pars.tx_residual_timing_early,
+            self.pars.tx_residual_timing_late,
+        )
+        # Recover a fraction of the accumulated timing shift
+        current_shift = np.array(self.timing_shift_applied[pregnant_uids], dtype=float)
+        recoverable = current_shift * (1 - timing_residual)
+
+        # Only recover if there's shift to recover
+        has_shift = recoverable > 0
+        if np.any(has_shift):
+            recover_uids = pregnant_uids[has_shift]
+            recover_ts = recoverable[has_shift]
+
+            # Push delivery back (later) by the recovered amount
+            current_delivery = np.array(preg.ti_delivery[recover_uids], dtype=float)
+            preg.ti_delivery[recover_uids] = current_delivery + recover_ts
+
+            # Update tracked shift
+            self.timing_shift_applied[recover_uids] -= recover_ts
 
         return
 
@@ -247,24 +271,15 @@ class FetalHealth(ss.Module):
         Compute birth weight for deliveries occurring this timestep.
 
         Birth weight = baseline_weight_for_ga × weight_percentile × (1 - growth_restriction)
-
-        Args:
-            mother_uids (ss.uids): UIDs of women delivering this timestep
-
-        Returns:
-            birth_weights (np.ndarray): birth weight in grams for each delivery
         """
         preg = self.sim.people.pregnancy
         ga_ts = np.array(preg.ti_delivery[mother_uids] - preg.ti_pregnant[mother_uids], dtype=float)
 
-        # Convert dur_pregnancy (in timestep units) to weeks
         dt_years = float(self.sim.pars.dt)
         ga_weeks_val = ga_ts * dt_years * 365.25 / 7
 
-        # Look up baseline weight for gestational age (interpolate)
         baseline_weight = np.interp(ga_weeks_val, GA_WEEKS, WEIGHT_GRAMS)
 
-        # Apply individual heterogeneity and growth restriction
         percentile = np.array(self.weight_percentile[mother_uids], dtype=float)
         restriction = np.array(self.growth_restriction[mother_uids], dtype=float)
 
@@ -288,10 +303,8 @@ class FetalHealth(ss.Module):
             self.on_conception(just_conceived.uids)
 
         # 2. Handle deliveries — women delivering this timestep.
-        # Note: Pregnancy.step() (demographics, func_order ~32) processes deliveries BEFORE
-        # analyzers run (func_order ~97). After delivery, pregnant is cleared and ti_delivery
-        # is set to exactly the current ti. So we detect just-delivered women by:
-        #   ti_delivery == ti  AND  not pregnant
+        # Pregnancy.step() processes deliveries BEFORE analyzers run.
+        # After delivery, pregnant is cleared and ti_delivery == ti.
         delivering = (preg.ti_delivery == ti) & ~preg.pregnant
         if not delivering.any():
             return
@@ -299,7 +312,6 @@ class FetalHealth(ss.Module):
         deliver_uids = delivering.uids
         birth_weights, ga_weeks = self.compute_birth_weight(deliver_uids)
 
-        # Store birth weight on mother (will be transferred to newborn in _post_delivery)
         self.birth_weight[deliver_uids] = birth_weights
 
         # Classify outcomes
@@ -309,8 +321,6 @@ class FetalHealth(ss.Module):
         is_preterm = ga_weeks < preterm_thresh
         is_lbw     = birth_weights < lbw_thresh
 
-        # SGA: weight below 10th percentile for gestational age
-        # Use baseline weight × SGA ratio as threshold
         sga_threshold = np.interp(ga_weeks, GA_WEEKS, WEIGHT_GRAMS) * self.pars.sga_ratio
         is_sga = birth_weights < sga_threshold
 

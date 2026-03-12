@@ -60,7 +60,9 @@ def prune_columns(df):
         'pregnancy_sti_stats.',
         'sw_stats.',
         'syndromic_vds.', 'syndromic_uds.',
-        'anc_screen.',
+        'anc_enroll.', 'anc_tri3.',
+        'partner_notif.',
+        'fetal_health.', 'birth_outcome_dalys.', 'intervention_costs.',
     ]
     cols = [c for c in df.columns if any(c.startswith(p) for p in keep_prefixes)]
     return df[cols]

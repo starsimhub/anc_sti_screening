@@ -76,22 +76,31 @@ def extract_results(sims, scenario):
                 except (KeyError, AttributeError):
                     pass
 
-        # ANC screening results (if present)
-        if 'anc_screen' in sim.interventions:
-            anc = sim.results.anc_screen
-            for metric_key in ['n_screened', 'n_positive']:
-                for year, val in zip(yearvec, anc[metric_key]):
+        # ANC screening results (if present) — check both screen instances
+        for screen_name in ['anc_enroll', 'anc_tri3']:
+            if screen_name in sim.interventions:
+                anc = sim.results[screen_name]
+                for metric_key in ['n_screened', 'n_positive']:
+                    for year, val in zip(yearvec, anc[metric_key]):
+                        all_rows.append(dict(scenario=scenario, par_idx=par_idx,
+                                             year=year, metric=f'{screen_name}.{metric_key}', value=float(val)))
+                for dis in ['ng', 'ct', 'tv']:
+                    for suffix in ['detected', 'true_pos', 'false_neg']:
+                        mkey = f'n_{dis}_{suffix}'
+                        try:
+                            for year, val in zip(yearvec, anc[mkey]):
+                                all_rows.append(dict(scenario=scenario, par_idx=par_idx,
+                                                     year=year, metric=f'{screen_name}.{mkey}', value=float(val)))
+                        except KeyError:
+                            pass
+
+        # Partner notification results (if present)
+        if 'partner_notif' in sim.interventions:
+            pn = sim.results.partner_notif
+            for metric_key in ['n_index_cases', 'n_partners_found', 'n_partners_treated']:
+                for year, val in zip(yearvec, pn[metric_key]):
                     all_rows.append(dict(scenario=scenario, par_idx=par_idx,
-                                         year=year, metric=f'anc.{metric_key}', value=float(val)))
-            for dis in ['ng', 'ct', 'tv']:
-                for suffix in ['detected', 'true_pos', 'false_neg']:
-                    mkey = f'n_{dis}_{suffix}'
-                    try:
-                        for year, val in zip(yearvec, anc[mkey]):
-                            all_rows.append(dict(scenario=scenario, par_idx=par_idx,
-                                                 year=year, metric=f'anc.{mkey}', value=float(val)))
-                    except KeyError:
-                        pass
+                                         year=year, metric=f'pn.{metric_key}', value=float(val)))
 
         # Pregnancy STI stats (if present)
         if 'pregnancy_sti_stats' in sim.analyzers:

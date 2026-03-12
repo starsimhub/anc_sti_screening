@@ -253,18 +253,20 @@ class intervention_costs(ss.Analyzer):
     def __init__(self, cost_poc_test=8.0, cost_anc_visit=3.0,
                  cost_tx_ng=5.0, cost_tx_ct=3.0, cost_tx_tv=2.0,
                  cost_ptb_mgmt=300.0, cost_lbw_mgmt=200.0,
-                 anc_screen_name='anc_screen', start=None, **kwargs):
+                 cost_partner_notif=5.0,
+                 anc_screen_names=None, start=None, **kwargs):
         super().__init__(**kwargs)
         self.name = 'intervention_costs'
-        self.cost_poc_test   = cost_poc_test
-        self.cost_anc_visit  = cost_anc_visit
-        self.cost_tx_ng      = cost_tx_ng
-        self.cost_tx_ct      = cost_tx_ct
-        self.cost_tx_tv      = cost_tx_tv
-        self.cost_ptb_mgmt   = cost_ptb_mgmt
-        self.cost_lbw_mgmt   = cost_lbw_mgmt
-        self.anc_screen_name = anc_screen_name
-        self.start           = start
+        self.cost_poc_test      = cost_poc_test
+        self.cost_anc_visit     = cost_anc_visit
+        self.cost_tx_ng         = cost_tx_ng
+        self.cost_tx_ct         = cost_tx_ct
+        self.cost_tx_tv         = cost_tx_tv
+        self.cost_ptb_mgmt      = cost_ptb_mgmt
+        self.cost_lbw_mgmt      = cost_lbw_mgmt
+        self.cost_partner_notif = cost_partner_notif
+        self.anc_screen_names   = anc_screen_names or ['anc_enroll', 'anc_tri3']
+        self.start              = start
 
     def init_pre(self, sim):
         super().init_pre(sim)
@@ -292,11 +294,12 @@ class intervention_costs(ss.Analyzer):
         if sim.t.yearvec[ti] < self.start:
             return
 
-        # --- Screening costs ---
+        # --- Screening costs (sum across all ANC screens) ---
         n_screened = 0
-        anc = sim.interventions.get(self.anc_screen_name)
-        if anc is not None:
-            n_screened = int(anc.results['n_screened'][ti])
+        for screen_name in self.anc_screen_names:
+            anc = sim.interventions.get(screen_name)
+            if anc is not None:
+                n_screened += int(anc.results['n_screened'][ti])
         cost_screening = n_screened * (self.cost_poc_test + self.cost_anc_visit)
 
         # --- Treatment costs ---
@@ -317,7 +320,14 @@ class intervention_costs(ss.Analyzer):
             pass
         cost_outcomes = n_ptb * self.cost_ptb_mgmt + n_lbw * self.cost_lbw_mgmt
 
-        total_cost = cost_screening + cost_treatment + cost_outcomes
+        # --- Partner notification costs ---
+        n_partners_treated = 0
+        pn = sim.interventions.get('partner_notif')
+        if pn is not None:
+            n_partners_treated = int(pn.results['n_partners_treated'][ti])
+        cost_pn = n_partners_treated * self.cost_partner_notif
+
+        total_cost = cost_screening + cost_treatment + cost_outcomes + cost_pn
 
         self.results['n_screened'][ti]     = n_screened
         self.results['n_treated_ng'][ti]   = n_treated_ng

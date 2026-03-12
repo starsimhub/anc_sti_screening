@@ -8,13 +8,14 @@ import sciris as sc
 percentile_pairs = [[.01, .99], [.1, .9], [.25, .75]]
 percentiles = [.5] + [p for pair in percentile_pairs for p in pair]
 
-# Scenario definitions
-scenarios = ['soc', 'anc_all', 'anc_ng_only', 'anc_ng_ct']
+# Scenario definitions — mapped to PROMISE trial design
+scenarios = ['soc', 'enroll', 'tri3', 'twice', 'partner_tx']
 scenlabels = {
-    'soc':         'Standard of care',
-    'anc_all':     'ANC screen (NG+CT+TV)',
-    'anc_ng_only': 'ANC screen (NG only)',
-    'anc_ng_ct':   'ANC screen (NG+CT)',
+    'soc':        'Standard of care',
+    'enroll':     'Enrollment screen (≤24w)',
+    'tri3':       'Third-trimester screen (32-34w)',
+    'twice':      'Both screens (PROMISE)',
+    'partner_tx': 'Both screens + partner Tx',
 }
 
 # Treatment labels
