@@ -75,9 +75,14 @@ def run_msim(n_pars=200, scenario='soc', start=1990, stop=2026):
         scenario (str):   scenario name
         start/stop (int): simulation time range
     """
+    print(f'Loading calibrated parameters...')
     pars_df = load_calib_pars()
+    print(f'Loaded {len(pars_df)} parameter sets, using top {n_pars}')
+
+    print(f'Building base sim: scenario={scenario}, {start}-{stop}')
     base = make_sim(scenario=scenario, start=start, stop=stop, verbose=-1)
 
+    print(f'Running {n_pars} sims...')
     msim = sti.make_calib_sims(
         calib_pars=pars_df,
         sim=base,
@@ -85,11 +90,13 @@ def run_msim(n_pars=200, scenario='soc', start=1990, stop=2026):
         check_fn=check_stis_alive,
     )
 
+    print(f'{len(msim.sims)}/{n_pars} sims passed check_fn')
     return msim.sims
 
 
 def save_results(sims, scenario='soc'):
     """ Convert sim results to DataFrames and compute percentile statistics """
+    print(f'Extracting results from {len(sims)} sims...')
     dfs = sc.autolist()
     for sim in sims:
         df = sim.to_df(resample='year', use_years=True, sep='.')
@@ -98,9 +105,11 @@ def save_results(sims, scenario='soc'):
         dfs += df
 
     resdf = pd.concat(dfs)
+    print(f'Computing percentile statistics ({len(resdf)} rows, {len(resdf.columns)} columns)...')
     cs = resdf.groupby(resdf.time).describe(percentiles=percentiles)
-    sc.saveobj(f'{RESULTS_DIR}/{LOCATION}_calib_stats_{scenario}.df', cs)
-    print(f'Saved calibration stats for {scenario}')
+    path = f'{RESULTS_DIR}/{LOCATION}_calib_stats_{scenario}.df'
+    sc.saveobj(path, cs)
+    print(f'Saved {path}')
 
     return cs
 

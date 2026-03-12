@@ -84,8 +84,8 @@ def make_hiv_intvs():
     # Treatment and prevention
     n_art  = pd.read_csv(f'{DATA_DIR}/n_art.csv').set_index('year')
     n_vmmc = pd.read_csv(f'{DATA_DIR}/n_vmmc.csv').set_index('year')
-    art  = sti.ART(coverage_data=n_art)
-    vmmc = sti.VMMC(coverage_data=n_vmmc)
+    art  = sti.ART(coverage=n_art)
+    vmmc = sti.VMMC(coverage=n_vmmc)
     prep = sti.Prep()
 
     return [fsw_testing, other_testing, low_cd4_testing, art, vmmc, prep]

@@ -255,7 +255,7 @@ class FetalHealth(ss.Module):
             birth_weights (np.ndarray): birth weight in grams for each delivery
         """
         preg = self.sim.people.pregnancy
-        ga_ts = np.array(preg.dur_pregnancy[mother_uids], dtype=float)
+        ga_ts = np.array(preg.ti_delivery[mother_uids] - preg.ti_pregnant[mother_uids], dtype=float)
 
         # Convert dur_pregnancy (in timestep units) to weeks
         dt_years = float(self.sim.pars.dt)
@@ -287,8 +287,12 @@ class FetalHealth(ss.Module):
         if just_conceived.any():
             self.on_conception(just_conceived.uids)
 
-        # 2. Handle deliveries — women delivering this timestep
-        delivering = preg.pregnant & (preg.ti_delivery <= ti)
+        # 2. Handle deliveries — women delivering this timestep.
+        # Note: Pregnancy.step() (demographics, func_order ~32) processes deliveries BEFORE
+        # analyzers run (func_order ~97). After delivery, pregnant is cleared and ti_delivery
+        # is set to exactly the current ti. So we detect just-delivered women by:
+        #   ti_delivery == ti  AND  not pregnant
+        delivering = (preg.ti_delivery == ti) & ~preg.pregnant
         if not delivering.any():
             return
 
