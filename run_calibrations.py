@@ -76,14 +76,14 @@ def make_calibration():
     sim = make_sim(verbose=-1, seed=1, start=1990, stop=2026)
     data = pd.read_csv(f'{DATA_DIR}/{LOCATION}_sti_data.csv')
 
-    weights = dict(
-        ng_prevalence=2,
-        ct_prevalence=2,
-        tv_prevalence=1,
-        ng_new_infections=0,
-        ct_new_infections=0,
-        tv_new_infections=0,
-    )
+    weights = {
+        'ng.prevalence': 2,
+        'ct.prevalence_f_25_30': 2,
+        'tv.prevalence': 1,
+        'ng.new_infections': 0,
+        'ct.new_infections': 0,
+        'tv.new_infections': 0,
+    }
 
     # Post-sim check: reject if STIs die out or HIV too low
     def check_fn(sim):
