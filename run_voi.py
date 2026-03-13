@@ -27,7 +27,6 @@ import sciris as sc
 import pandas as pd
 from model import make_sim
 from analyzers import birth_outcome_dalys, intervention_costs
-from fetal_health import FetalHealth
 from priors import sample_priors
 from stisim.calibration import set_sim_pars
 
@@ -52,9 +51,9 @@ def load_posterior(n_top=200):
     return df.head(n_top)
 
 
-def make_fetal_health(draw):
-    """Construct FetalHealth with sampled birth outcome parameters."""
-    return FetalHealth(
+def make_connector_pars(draw):
+    """Build sti_fetal connector pars from sampled birth outcome parameters."""
+    return dict(
         ptb_shift_mean=dict(
             ng=float(draw['ptb_shift_ng']),
             ct=float(draw['ptb_shift_ct']),
@@ -98,8 +97,7 @@ def make_sim_pair(epi_pars, draw, seed):
         draw (dict):     sampled birth outcome + cost parameters
         seed (int):      shared random seed for CRN
     """
-    fh_soc  = make_fetal_health(draw)
-    fh_intv = make_fetal_health(draw)
+    conn_pars = make_connector_pars(draw)
     daly_soc  = birth_outcome_dalys(start=INTV_YEAR)
     daly_intv = birth_outcome_dalys(start=INTV_YEAR)
     cost_soc  = make_cost_analyzer(draw)
@@ -107,12 +105,14 @@ def make_sim_pair(epi_pars, draw, seed):
 
     sim_soc = make_sim(
         scenario=SOC_SCENARIO, seed=seed, start=START, stop=STOP,
-        verbose=-1, analyzers=[fh_soc, daly_soc, cost_soc],
+        verbose=-1, analyzers=[daly_soc, cost_soc],
+        connector_pars=conn_pars,
     )
 
     sim_intv = make_sim(
         scenario=INTV_SCENARIO, seed=seed, start=START, stop=STOP,
-        verbose=-1, analyzers=[fh_intv, daly_intv, cost_intv],
+        verbose=-1, analyzers=[daly_intv, cost_intv],
+        connector_pars=conn_pars,
     )
 
     # Apply calibrated epi parameters

@@ -15,7 +15,7 @@ import stisim as sti
 
 from interventions import make_testing
 from analyzers import make_analyzers
-from fetal_health import FetalHealth
+from starsim import FetalHealth
 from connectors import sti_fetal
 
 # Constants
@@ -108,19 +108,20 @@ def make_diseases():
 
 # %% Sim construction
 def make_sim(scenario='soc', seed=1, start=1990, stop=2030, n_agents=None, debug=False,
-             verbose=1/12, analyzers=None):
+             verbose=1/12, analyzers=None, connector_pars=None):
     """
     Build the simulation.
 
     Args:
-        scenario (str):   screening scenario name (e.g. 'soc', 'anc_screen')
-        seed (int):       random seed
-        start (int):      simulation start year
-        stop (int):       simulation stop year
-        n_agents (int):   population size (default 10k, 500 for debug)
-        debug (bool):     if True, use small population
-        verbose (float):  print frequency in years
-        analyzers (list): additional analyzers to include
+        scenario (str):      screening scenario name (e.g. 'soc', 'anc_screen')
+        seed (int):          random seed
+        start (int):         simulation start year
+        stop (int):          simulation stop year
+        n_agents (int):      population size (default 10k, 500 for debug)
+        debug (bool):        if True, use small population
+        verbose (float):     print frequency in years
+        analyzers (list):    additional analyzers to include
+        connector_pars (dict): override pars for the sti_fetal connector
     """
     total_pop = {1970: 5.203e6, 1980: 7.05e6, 1985: 8.691e6, 1990: 9980999, 2000: 11.83e6}[start]
     if n_agents is None:
@@ -148,17 +149,8 @@ def make_sim(scenario='soc', seed=1, start=1990, stop=2030, n_agents=None, debug
     diseases, connectors = make_diseases()
 
     # Fetal health module + connector
-    # Check if a custom FetalHealth was passed in analyzers
-    has_custom_fh = False
-    if analyzers is not None:
-        for a in sc.tolist(analyzers):
-            if isinstance(a, FetalHealth):
-                has_custom_fh = True
-                break
-    if not has_custom_fh:
-        fetal_health = FetalHealth()
-        analyzers = sc.mergelists(fetal_health, analyzers)
-    connectors.append(sti_fetal())
+    fetal_health = FetalHealth()
+    connectors.append(sti_fetal(**(connector_pars or {})))
 
     # Interventions: HIV + STI testing
     hiv_intvs = make_hiv_intvs()
@@ -189,6 +181,7 @@ def make_sim(scenario='soc', seed=1, start=1990, stop=2030, n_agents=None, debug
         connectors=connectors,
         interventions=interventions,
         analyzers=analyzers,
+        custom=fetal_health,
     )
     sim.scenario = scenario
 

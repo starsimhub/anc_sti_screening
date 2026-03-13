@@ -185,7 +185,7 @@ class birth_outcome_dalys(ss.Analyzer):
             return
 
         try:
-            fh = sim.analyzers['fetal_health']
+            fh = sim.custom['fetal_health']
         except (KeyError, AttributeError):
             return
 
@@ -313,7 +313,7 @@ class intervention_costs(ss.Analyzer):
         # --- Adverse outcome management costs ---
         n_ptb = n_lbw = 0
         try:
-            fh = sim.analyzers['fetal_health']
+            fh = sim.custom['fetal_health']
             n_ptb = int(fh.results['n_preterm'][ti])
             n_lbw = int(fh.results['n_lbw'][ti])
         except (KeyError, AttributeError):
