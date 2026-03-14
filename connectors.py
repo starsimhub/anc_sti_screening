@@ -30,9 +30,8 @@ class sti_fetal(ss.Connector):
         ptb_shift_mean (dict):       mean weeks delivery brought forward, per disease
         ptb_shift_std (float):       individual heterogeneity in timing shift
         growth_penalty (dict):       fractional weight reduction per infection, per disease
-        tx_residual_growth_early/late (float): fraction of growth damage persisting after treatment
-        tx_residual_timing_early/late (float): fraction of timing damage persisting after treatment
-        early_late_cutoff (dur):     GA cutoff for early vs late treatment
+        tx_residual_growth (dict):   fraction of growth damage persisting after treatment, per trimester
+        tx_residual_timing (dict):   fraction of timing damage persisting after treatment, per trimester
     """
 
     def __init__(self, diseases=None, treatments=None, treatment_disease_map=None,
@@ -57,14 +56,10 @@ class sti_fetal(ss.Connector):
             # Growth restriction per infection (fractional weight reduction)
             growth_penalty=sc.objdict(ng=0.08, ct=0.03, tv=0.03),
 
-            # Treatment reversibility -- fraction of damage PERSISTING after treatment
-            tx_residual_growth_early=0.33,
-            tx_residual_growth_late=0.50,
-            tx_residual_timing_early=0.50,
-            tx_residual_timing_late=0.71,
-
-            # GA cutoff for early vs late treatment
-            early_late_cutoff=ss.weeks(24),
+            # Treatment reversibility -- fraction of damage PERSISTING after treatment, by trimester
+            # T1: most reversible (early treatment), T3: least reversible (damage locked in)
+            tx_residual_growth=sc.objdict(tri1=0.25, tri2=0.40, tri3=0.60),
+            tx_residual_timing=sc.objdict(tri1=0.35, tri2=0.55, tri3=0.75),
 
             # Distribution for sampling individual timing shifts (mean/std set dynamically per disease)
             ptb_shift_dist=ss.lognorm_ex(mean=1.0, std=1.0),
@@ -75,12 +70,14 @@ class sti_fetal(ss.Connector):
 
     def init_pre(self, sim):
         super().init_pre(sim)
+
         # Register conception callback with FetalHealth
         try:
             fh = sim.custom['fetal_health']
             fh.add_conception_callback(self._on_conception)
         except (KeyError, AttributeError):
             pass
+
         return
 
     def _get_fh(self):
@@ -125,41 +122,40 @@ class sti_fetal(ss.Connector):
     def _apply_treatment(self, uids, disease_name):
         """Reverse fetal health damage when an infection is treated during pregnancy."""
         fh = self._get_fh()
-        if fh is None:
+        if fh is None or not len(uids):
             return
 
+        # Determine trimester from Pregnancy's gestation and trimester boundaries
         preg = self.sim.people.pregnancy
-        pregnant_uids = uids[preg.pregnant[uids]]
-        if not len(pregnant_uids):
-            return
-
-        # Use the Pregnancy module's gestation tracker (already in weeks)
-        ga_weeks = np.asarray(preg.gestation[pregnant_uids], dtype=float)
-        cutoff = self.pars.early_late_cutoff.weeks
-        is_early = ga_weeks <= cutoff
+        ga_weeks   = preg.gestation[uids]
+        boundaries = preg.pars.trimesters
+        b1 = boundaries[0].weeks  # ~13w
+        b2 = boundaries[1].weeks  # ~26w
+        trimester = np.ones(len(uids), dtype=int)
+        trimester[ga_weeks >= b1] = 2
+        trimester[ga_weeks >= b2] = 3
 
         # Growth restriction reversal
         penalty = self.pars.growth_penalty.get(disease_name, 0)
         if penalty > 0:
-            residual = np.where(
-                is_early,
-                self.pars.tx_residual_growth_early,
-                self.pars.tx_residual_growth_late,
+            residual = np.select(
+                [trimester == 1, trimester == 2, trimester == 3],
+                [self.pars.tx_residual_growth.tri1, self.pars.tx_residual_growth.tri2, self.pars.tx_residual_growth.tri3],
             )
             reversible = penalty * (1 - residual)
-            fh.reverse_growth_restriction(pregnant_uids, reversible)
+            fh.reverse_growth_restriction(uids, reversible)
 
         # Timing shift reversal
-        timing_residual = np.where(
-            is_early,
-            self.pars.tx_residual_timing_early,
-            self.pars.tx_residual_timing_late,
+        timing_residual = np.select(
+            [trimester == 1, trimester == 2, trimester == 3],
+            [self.pars.tx_residual_timing.tri1, self.pars.tx_residual_timing.tri2, self.pars.tx_residual_timing.tri3],
         )
-        fh.reverse_timing_shift(pregnant_uids, 1 - timing_residual)
+        fh.reverse_timing_shift(uids, 1 - timing_residual)
 
         return
 
     def step(self):
+        """ Apply infection effects on fetal health for newly infected pregnant women. """
         sim = self.sim
         ti = self.ti
         ppl = sim.people
@@ -186,7 +182,30 @@ class sti_fetal(ss.Connector):
             if len(affected):
                 self._apply_infection(affected, dname)
 
-        # --- Treatments in pregnant women ---
+        return
+
+    def update_results(self):
+        """
+        Detect treatments and reverse fetal damage.
+
+        Runs in the update_results phase, which is AFTER interventions in the
+        loop. This ensures ti_treated has been set before we check it.
+        """
+        super().update_results()
+
+        sim = self.sim
+        ti = self.ti
+
+        fh = self._get_fh()
+        if fh is None:
+            return
+
+        preg = sim.people.pregnancy
+        if not preg.pregnant.any():
+            return
+
+        pregnant_uids = preg.pregnant.uids
+
         for tx_name in self.treatment_names:
             try:
                 tx = sim.interventions[tx_name]

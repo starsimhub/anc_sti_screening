@@ -58,12 +58,14 @@ growth_penalty_pars = sc.objdict(
 
 # %% Treatment reversibility parameters (Section 3d)
 # Fraction of damage that PERSISTS after treatment (0 = full recovery, 1 = no effect).
-# Split by early (≤24w) vs late (32-34w) treatment timing.
+# Split by trimester: T1 (<13w), T2 (13-26w), T3 (≥26w).
 tx_residual_pars = sc.objdict(
-    tx_residual_growth_early  = ('Tx residual growth (early)',  stats.beta(2, 4)),  # mean ~0.33; more recovery with early treatment
-    tx_residual_growth_late   = ('Tx residual growth (late)',   stats.beta(3, 3)),  # mean ~0.50; less time to recover
-    tx_residual_timing_early  = ('Tx residual timing (early)',  stats.beta(3, 3)),  # mean ~0.50; relaxes the one-way ratchet
-    tx_residual_timing_late   = ('Tx residual timing (late)',   stats.beta(5, 2)),  # mean ~0.71; late treatment unlikely to recover timing
+    tx_residual_growth_tri1 = ('Tx residual growth (T1)', stats.beta(2, 6)),  # mean ~0.25; early treatment reverses most
+    tx_residual_growth_tri2 = ('Tx residual growth (T2)', stats.beta(2, 3)),  # mean ~0.40; moderate reversibility
+    tx_residual_growth_tri3 = ('Tx residual growth (T3)', stats.beta(3, 2)),  # mean ~0.60; damage largely locked in
+    tx_residual_timing_tri1 = ('Tx residual timing (T1)', stats.beta(2, 4)),  # mean ~0.35; timing most recoverable early
+    tx_residual_timing_tri2 = ('Tx residual timing (T2)', stats.beta(3, 3)),  # mean ~0.55; moderate recovery
+    tx_residual_timing_tri3 = ('Tx residual timing (T3)', stats.beta(5, 2)),  # mean ~0.75; late treatment minimal timing recovery
 )
 
 
