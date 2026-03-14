@@ -205,8 +205,8 @@ class birth_outcome_dalys(ss.Analyzer):
 
         # Read birth outcomes from newborns (preterm from Pregnancy, lbw from FetalHealth)
         preg   = sim.people.pregnancy
-        is_ptb = np.asarray(preg.preterm[newborn_uids], dtype=bool)
-        is_lbw = np.asarray(fh.lbw[newborn_uids], dtype=bool)
+        is_ptb = preg.preterm[newborn_uids]
+        is_lbw = fh.lbw[newborn_uids]
 
         n_ptb     = int(np.sum(is_ptb))
         n_lbw     = int(np.sum(is_lbw))
