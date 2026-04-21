@@ -1,0 +1,341 @@
+---
+title: "Pre-trial value of information: ANC bacterial STI screening in Zimbabwe"
+subtitle: "Preliminary findings, internal discussion draft"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    number-sections: true
+    code-fold: true
+    embed-resources: true
+    theme: cosmo
+    fig-cap-location: bottom
+    tbl-cap-location: top
+---
+
+## Context
+
+The WHO is weighing whether to include asymptomatic screening for bacterial STIs (*Neisseria gonorrhoeae*, *Chlamydia trachomatis*, *Trichomonas vaginalis*) in antenatal care guidelines. The evidence base is thin: most estimates of the link between untreated STIs and adverse birth outcomes come from small observational studies with wide confidence intervals, and LMIC-specific cost data are patchy. The PROMISE trial aims to fill part of that gap, but pre-trial it is worth asking two questions:
+
+1. Given what we currently know and don't know, how likely is it that adding screening would be cost-effective in a setting like Zimbabwe?
+2. Which pieces of uncertainty actually matter for the decision? If we could resolve one class of parameters perfectly, how much would it change the answer?
+
+This brief summarises a preliminary value-of-information analysis built on the same Zimbabwe STIsim model we used in the published syphilis diagnostics work and the NG/CT/TV diagnostics paper. It lays out the methods in enough detail that collaborators can review the approach before we commit to a fuller analysis, and shares initial results that frame where the decision is (and isn't) sensitive to evidence.
+
+## Methods
+
+### Model
+
+Structure, demographics, sexual network, and HIV/STI transmission dynamics are as in the published Zimbabwe model. Briefly: a structured heterosexual network with three activity groups parameterised to ZIMPHIA-consistent HIV prevalence and Harare ANC-based NG/CT/TV prevalence targets; a simulated population of 10,000 agents scaling to the Zimbabwe 1990 population (scale factor ~1000); burn-in from 1990, with the intervention beginning 2027 and outcomes accumulated through 2040.
+
+Two new pieces sit on top of this baseline for the present analysis:
+
+* A generic `FetalHealth` module (part of upstream Starsim) that tracks, per pregnancy, a delivery-timing shift and a cumulative growth-restriction burden, and classifies births as preterm (<37 weeks) and/or low birth weight (<2500 g) at delivery.
+* A disease-specific `sti_fetal` connector that applies pathogen-specific damage to `FetalHealth` when pregnant women acquire an STI, and partially reverses that damage when they are treated. The connector holds all of the birth-outcome parameters that are subject to uncertainty in this analysis.
+
+This mechanistic layer is richer than a post-hoc RR/OR model: outcomes emerge from the actual timing of infection and treatment within each pregnancy, so treatment at enrolment versus third trimester has realistic differential consequences.
+
+### Intervention scenarios
+
+The VoI run presented here compares two arms, matched on all epidemiological parameters and random seeds:
+
+| Arm | Screening |
+|-----|-----------|
+| SOC | Syndromic management only; no routine ANC STI screening |
+| PROMISE "twice" | POC test (95/95) at ANC enrolment (≤24w) **and** at third trimester (≥28w), with treatment on positive result |
+
+The repo also supports three other scenarios (`enroll` only, `tri3` only, `partner_tx`), which we will fold into a follow-up comparison.
+
+### Parameter partition
+
+Parameters were split into two groups according to how they are constrained:
+
+* **Epidemiological parameters (15).** Transmission and network parameters that are identifiable from prevalence data. These were calibrated to Zimbabwe targets via Optuna; the top 192 parameter sets consistent with the targets are used as the epidemiological distribution feeding the VoI loop. These are the same parameters and bounds used in our diagnostics papers.
+* **Birth-outcome, treatment-reversibility, and cost parameters (17).** Parameters that prevalence data do not identify. These are held as prior distributions throughout, unchanged by calibration.
+
+HIV transmission parameters are kept in the calibration (because HIV prevalence shapes who is co-infected and who seeks care) but are fixed at posterior values for the VoI analysis itself; they do not contribute to decision uncertainty here.
+
+#### Calibrated epidemiological parameters {.unnumbered}
+
+| Parameter | Low | High | Scale |
+|-----------|-----|------|-------|
+| `hiv.beta_m2f` (M→F per-act) | 0.002 | 0.014 | linear |
+| `hiv.eff_condom` | 0.5 | 0.9 | linear |
+| `hiv.rel_init_prev` | 2 | 15 | linear |
+| `structuredsexual.prop_f0` (women in lowest-activity group) | 0.55 | 0.9 | linear |
+| `structuredsexual.prop_m0` (men in lowest-activity group) | 0.55 | 0.85 | linear |
+| `structuredsexual.m1_conc` (concurrency, higher-activity men) | 0.05 | 0.3 | linear |
+| `ng.beta_m2f` | 0.02 | 0.25 | log |
+| `ng.p_symp` | 0.05 | 0.30 | linear |
+| `ct.beta_m2f` | 0.02 | 0.25 | log |
+| `ct.p_symp` | 0.10 | 0.35 | linear |
+| `tv.beta_m2f` | 0.02 | 0.25 | log |
+| `tv.p_symp` | 0.15 | 0.75 | linear |
+
+: Prior bounds on the calibrated parameters, carried over from the published Zimbabwe diagnostics work. {#tbl-calib}
+
+#### Calibration targets {.unnumbered}
+
+| Target | Estimate | 95% CI | Source |
+|--------|----------|--------|--------|
+| HIV prevalence, women 15–49 | 14.5% | (13.0%, 16.0%) | ZIMPHIA 2020 |
+| HIV prevalence, ANC women | 16.0% | (14.0%, 19.0%) | Zimbabwe PMTCT data |
+| Ng prevalence, ANC women | 3.5% | (1.5%, 6.0%) | Mudau et al. 2018 |
+| Ct prevalence, ANC women | 8.0% | (5.0%, 12.0%) | Mudau et al. 2018; Peters et al. 2021 |
+| Tv prevalence, ANC women | 18.0% | (12.0%, 25.0%) | Masha et al. 2019 |
+
+: Calibration targets. Weighted least-squares objective over these targets; top 192 parameter sets retained. {#tbl-targets}
+
+### Birth-outcome mechanism and prior distributions
+
+The `sti_fetal` connector applies two kinds of damage when a pregnant woman acquires an STI, and partially reverses each kind when she is treated. The distributions below are the priors carried into the VoI analysis.
+
+**Delivery timing.** Each new infection shifts the expected delivery date earlier by a stochastic number of weeks drawn from a lognormal distribution with pathogen-specific mean. Reinfection compounds the shift. Treatment reverses the shift by a fraction `1 − tx_residual_timing[trimester]` depending on gestational age at treatment. A birth is classified as preterm if it occurs before 37 weeks.
+
+::: {.callout-note title="Worked example: delivery timing"}
+A woman enters pregnancy with a baseline expected delivery at 40 weeks' gestation.
+
+* At 10 weeks' gestation she acquires *Ng*. The connector draws a shift of 2.0 weeks from the `ptb_shift_ng` distribution and pulls her expected delivery to 38 weeks, still not preterm.
+* She is screened and treated at 14 weeks (first trimester). The residual fraction `tx_residual_timing_tri1` draws 0.35, so 65% of the shift reverses: 1.3 weeks recovered. Expected delivery moves back to 39.3 weeks.
+* At 28 weeks she acquires *Ct*. A shift of 1.4 weeks is added, pulling expected delivery to 37.9 weeks, still not preterm.
+* She is not re-screened (her arm has two screens only) and delivers at 37.9 weeks. Outcome: **term birth**.
+
+Had the second infection happened at 32 weeks and gone untreated, or had the first treatment been in the third trimester (residual ≈ 0.75, only 25% reversal), the same sequence would have produced a preterm birth.
+:::
+
+**Fetal growth.** Each infection accumulates a fractional weight penalty. At delivery, realised weight is `baseline_for_GA × percentile × (1 − total_penalty)`. Treatment recovers a fraction `1 − tx_residual_growth[trimester]` of the accumulated penalty. LBW is defined as <2500 g.
+
+::: {.callout-note title="Worked example: fetal growth"}
+Consider the same woman with a baseline term weight that would be 3,100 g at her individual percentile and full gestation.
+
+* At 10 weeks she acquires *Ng*. The connector draws `growth_penalty_ng` = 0.08, an 8% weight reduction.
+* At 14 weeks she is treated. `tx_residual_growth_tri1` draws 0.25, so 75% of the penalty reverses, leaving a residual penalty of 0.02 (= 0.08 × 0.25).
+* At 28 weeks she acquires *Ct*, adding a penalty of 0.03. Total penalty is now 0.05.
+* She is not re-treated. At delivery her realised weight is 3,100 × (1 − 0.05) = **2,945 g**: low but above the 2,500 g LBW threshold.
+
+Had both infections occurred in the third trimester and gone untreated, the total penalty of 0.11 would produce a 2,759 g birth, still above LBW for this baseline. But for a woman on a lower weight trajectory (say a baseline of 2,700 g), the same 0.11 penalty produces a 2,403 g delivery, classified as LBW. The same parameter draw can therefore produce different outcomes depending on the woman's baseline growth trajectory, which is what the mechanistic formulation captures.
+:::
+
+#### Delivery-timing priors {.unnumbered}
+
+| Parameter | Prior | Source |
+|-----------|-------|--------|
+| `ptb_shift_ng` | LogNormal(μ=log 2.0, σ=0.4) wk | Vallely 2021 meta-analysis, RR 1.40 (1.14–1.73) |
+| `ptb_shift_ct` | LogNormal(μ=log 1.5, σ=0.4) wk | He 2020 meta-analysis, OR 1.35 (1.11–1.63) |
+| `ptb_shift_tv` | LogNormal(μ=log 1.0, σ=0.4) wk | Silver 2014, RR 1.42 (1.15–1.75) |
+| `ptb_shift_std` | LogNormal(μ=log 1.0, σ=0.3) wk | Individual-level heterogeneity |
+
+: Pathogen-specific delivery-timing shifts (→ preterm birth). {#tbl-ptb}
+
+#### Growth-restriction priors {.unnumbered}
+
+| Parameter | Prior | Source |
+|-----------|-------|--------|
+| `growth_penalty_ng` | Beta(4, 46), mean ≈ 0.08 | Vallely 2021, RR 2.23 (1.34–3.71) |
+| `growth_penalty_ct` | Beta(2, 65), mean ≈ 0.03 | He 2020, OR 1.49 (0.90–2.47) |
+| `growth_penalty_tv` | Beta(2, 65), mean ≈ 0.03 | Silver 2014, RR 1.51 (1.32–1.73) |
+
+: Pathogen-specific fractional weight penalties (→ LBW/SGA). {#tbl-growth}
+
+#### Treatment reversibility priors (by trimester at treatment) {.unnumbered}
+
+| Parameter | Prior (residual fraction) | Interpretation |
+|-----------|---------------------------|----------------|
+| `tx_residual_growth_tri1` | Beta(2, 6), mean ≈ 0.25 | Early treatment recovers most growth damage |
+| `tx_residual_growth_tri2` | Beta(2, 3), mean ≈ 0.40 | Moderate recovery |
+| `tx_residual_growth_tri3` | Beta(3, 2), mean ≈ 0.60 | Most growth damage locked in |
+| `tx_residual_timing_tri1` | Beta(2, 4), mean ≈ 0.35 | Timing most recoverable early |
+| `tx_residual_timing_tri2` | Beta(3, 3), mean ≈ 0.55 | Moderate recovery |
+| `tx_residual_timing_tri3` | Beta(5, 2), mean ≈ 0.75 | Late treatment minimal timing recovery |
+
+: Residual-damage fractions: 0 = full recovery, 1 = no treatment effect. This is the class of parameters the PROMISE trial is most directly designed to inform. {#tbl-reversibility}
+
+#### Cost priors (all placeholders) {.unnumbered}
+
+| Parameter | Prior | Status |
+|-----------|-------|--------|
+| `cost_poc_test` | Gamma(μ=\$8, σ=\$4) | **placeholder** |
+| `cost_tx_ct` (azithromycin) | Gamma(μ=\$3, σ=\$2) | **placeholder** |
+| `cost_tx_ng` (dual therapy) | Gamma(μ=\$5, σ=\$3) | **placeholder** |
+| `cost_tx_tv` (metronidazole) | Gamma(μ=\$2, σ=\$1) | **placeholder** |
+| `cost_partner_notif` | Gamma(μ=\$5, σ=\$4) | **placeholder** |
+| `cost_anc_visit` (marginal) | Gamma(μ=\$3, σ=\$2) | **placeholder** |
+| `cost_ptb_mgmt` | Gamma(μ=\$300, σ=\$200) | **placeholder** |
+| `cost_lbw_mgmt` | Gamma(μ=\$200, σ=\$150) | **placeholder** |
+
+: None of the cost priors are Zimbabwe-grounded. Replacing them with local data is the single largest methodological upgrade before the analysis is policy-ready. {#tbl-costs}
+
+#### Fixed parameters {.unnumbered}
+
+| Item | Value | Source |
+|------|-------|--------|
+| POC test sensitivity | 0.95 | Assumed high-quality test |
+| POC test specificity | 0.95 | Assumed high-quality test |
+| DALY weight, preterm birth | 0.15 | GBD 2019 |
+| DALY weight, LBW (without PTB) | 0.10 | GBD 2019 |
+| DALY duration, PTB | 1.0 year | Acute + early sequelae |
+| DALY duration, LBW | 1.0 year | Acute + early sequelae |
+
+: Fixed model inputs not varied in the VoI analysis. {#tbl-fixed}
+
+### DALY calculation
+
+DALYs are accumulated each simulation step from 2027 onwards by reading delivery outcomes off the simulated newborn cohort. The analyzer counts preterm births (PTB: gestational age at delivery < 37 weeks, flagged by the `Pregnancy` module) and low-birth-weight deliveries (LBW: realised weight < 2,500 g, flagged by the `FetalHealth` module), then applies GBD 2019 disability weights and a one-year accrual duration:
+
+$$
+\text{YLD}_t \;=\; n_{\text{PTB},t} \cdot 0.15 \cdot 1 \;+\; (n_{\text{LBW},t} - n_{\text{PTB}\cap\text{LBW},t}) \cdot 0.10 \cdot 1
+$$
+
+Cumulative DALYs are the sum of YLD over the analysis horizon (2027–2040).
+
+**What is counted**
+
+* Years lived with disability (YLD) attributed to PTB and LBW among live-born newborns of simulated pregnancies in Zimbabwe from 2027 onwards.
+* PTB and LBW are **not** double-counted. A baby born both preterm and LBW contributes only the PTB weight (the larger of the two), so the total in any timestep is `n_PTB × 0.15 + n_LBW_only × 0.10`.
+
+**What is *not* counted (a conservative bias in the DALYs-averted estimate)**
+
+* **Neonatal and infant mortality.** No YLL component. Babies who die as a consequence of PTB/LBW contribute only the one-year YLD and nothing from lost life-years. Neonatal mortality from PTB/LBW is a material share of the disease burden, so the DALY-averted numbers are a lower bound on the true health impact.
+* **Long-term sequelae of PTB/LBW** beyond one year (developmental delay, chronic respiratory disease, long-term growth effects). The one-year duration is a deliberate simplification; the GBD handles these with separate sequelae weights and lifetime durations that we have not yet implemented.
+* **Maternal DALYs from STI infection.** The analyzer tracks adverse birth outcomes only, not maternal morbidity from untreated NG/CT/TV (PID, tubal damage, infertility sequelae).
+* **DALYs from onward transmission.** Averted infections in sexual partners (from treating pregnant women and their partners) do not feed back into the DALY count. Only the pregnancy-outcome pathway does.
+* **Stillbirth.** Not currently modelled as a separate endpoint.
+* **HIV co-infection acquisition or transmission.** HIV dynamics shape who is co-infected and who seeks care, but HIV-related DALYs are outside the scope of this screening comparison.
+* **Congenital outcomes beyond PTB/LBW.** This analysis looks at NG/CT/TV only and does not replay the congenital-syphilis machinery from our syphilis diagnostics work.
+
+The direction of these omissions is consistent: each would add DALYs averted to the intervention side (the screening arm averts more of everything left out), so the ΔDALYs values used here are a lower bound on the true incremental health benefit. The ICER and P(CE) numbers should therefore be read as **conservative** with respect to the intervention. Whether adding neonatal mortality alone would shift the ICER enough to change the decision at a Zimbabwe WTP is a natural first sensitivity analysis to run next.
+
+### Analysis
+
+The pipeline is a single pass: draw parameters from the joint uncertainty, run a paired simulation, collect the increment, repeat 200 times. @fig-pipeline summarises it.
+
+```{mermaid}
+%%| label: fig-pipeline
+%%| fig-cap: "Analysis pipeline. Each of the 200 draws produces one paired SOC / `twice` simulation and one (ΔDALYs, ΔCosts) pair; the 200 paired outcomes are the joint sample used to compute P(CE), EVPI, and EVPPI at each willingness-to-pay threshold."
+flowchart TD
+    A[Calibration-consistent<br/>epi parsets<br/>n = 192] --> C
+    B[Prior distributions<br/>birth-outcome, reversibility,<br/>and cost parameters<br/>17 parameters] --> C
+    C["Draw <i>i</i> ∈ 1…200<br/>1 epi parset + 1 prior sample + seed s<sub>i</sub>"]
+    C --> D[SOC simulation<br/>seed = s<sub>i</sub>]
+    C --> E["<tt>twice</tt> simulation<br/>seed = s<sub>i</sub>"]
+    D --> F["Paired increment<br/>ΔDALYs<sub>i</sub>, ΔCosts<sub>i</sub>"]
+    E --> F
+    F --> G["200 (ΔDALYs, ΔCosts) pairs"]
+    G --> H["P(CE), EVPI, EVPPI<br/>at each WTP"]
+```
+
+For each draw *i* ∈ 1…200:
+
+1. An epidemiological parameter set is drawn from the 192 calibration-consistent parsets (cycled through so each is used roughly equally).
+2. A full set of birth-outcome, reversibility, and cost parameters is drawn from the priors above.
+3. A matched pair of simulations is run, one under SOC and one under `twice`, using the **same random seed** across the pair, so differences between arms reflect the intervention rather than stochastic noise. This paired-seed design is the standard variance-reduction setup for incremental cost-effectiveness simulations.
+4. Incremental DALYs averted and incremental cost are extracted at the end of the horizon (2040). Incremental net monetary benefit at willingness-to-pay *λ* is NMB(*λ*) = *λ* × ΔDALYs − ΔCosts.
+
+The 200 paired draws yield a joint sample over all sources of uncertainty, from which we compute:
+
+* **Probability cost-effective**, P(NMB > 0), as a function of *λ*.
+* **EVPI**(*λ*), the expected value of perfectly resolving all uncertainty: E[max(NMB, 0)] − max(E[NMB], 0).
+* **EVPPI**(*λ*) for each parameter group: the decision-relevant contribution of each class of parameter, estimated via gradient-boosted regression of NMB on the parameters in the group (Strong et al. 2014), 5-fold cross-validated.
+
+::: {.callout-note title="Worked example: what EVPI means"}
+EVPI answers: *if we had a crystal ball that told us the true parameter values before we made the decision, how much better off would we be, on average?* It is the maximum we should ever pay for perfect information.
+
+Suppose, for transparent arithmetic, that we had only 5 draws instead of 200. At a WTP of **\$5,000/DALY**, the draws give:
+
+| Draw | ΔDALYs | ΔCosts | NMB = 5,000 × ΔDALYs − ΔCosts |
+|------|--------|--------|-------------------------------|
+| 1 | 30 | \$100,000 | **+\$50,000** |
+| 2 | 25 | \$150,000 | −\$25,000 |
+| 3 | 35 | \$120,000 | **+\$55,000** |
+| 4 | 20 | \$140,000 | −\$40,000 |
+| 5 | 30 | \$180,000 | −\$30,000 |
+
+*Decision under current uncertainty.* We take the average NMB: E[NMB] = (+50 − 25 + 55 − 40 − 30) / 5 = +\$2k. It is marginally positive, so under current evidence we adopt the intervention. On average we realise +\$2k per cohort, but in three of the five states of the world we actually lose money on the decision.
+
+*Decision under perfect information.* If the crystal ball revealed which state we were in, we would adopt the intervention only in draws 1 and 3 (where NMB > 0) and decline in the other three (where NMB = 0 is the better of the two). Expected NMB across all five states would be (50 + 0 + 55 + 0 + 0) / 5 = +\$21k.
+
+*EVPI.* The gap between the two is \$21k − \$2k = **\$19k per cohort**. That is the most we should ever spend (on trials, data collection, surveillance) to perfectly resolve all uncertainty in this problem at a WTP of \$5,000.
+
+Now contrast with **\$1,000/DALY** using the same five draws. All five NMBs are deeply negative (e.g. Draw 1: 1,000 × 30 − 100,000 = −\$70k). E[NMB] is −\$110k, so under current uncertainty we decline the intervention and realise \$0. With perfect information we would *also* decline in every single state, because no draw produces NMB > 0. Expected NMB under perfect info is still \$0. **EVPI = \$0**: no amount of information, however perfect, changes what we should do when the decision is that one-sided.
+
+This is why the EVPI curve in @fig-ceac is a hill. At low WTP the decision is clearly "no" and information has no value. At high WTP it is clearly "yes" and information has little value. Only in the indifference band (~\$3k–\$7k/DALY for this analysis) does information meaningfully shift the decision, and therefore only there is it worth paying to collect.
+:::
+
+DALYs and costs are tallied on the simulated cohort of ~3,900 deliveries over the 2027–2040 horizon. Absolute \$/NMB figures should be read **per simulated cohort**; ICERs and P(CE) are scale-invariant and translate directly to the real population.
+
+## Results
+
+### Where the calibration lands and what stays uncertain
+
+![Prior and posterior (calibration-restricted) parameter distributions. Row A: calibrated epidemiological parameters, showing data-driven narrowing. Rows B–C: birth-outcome, reversibility, and cost parameters, which remain at their priors throughout.](figures/fig4_priors_posteriors.png){#fig-priors}
+
+### The intervention is health-improving but expensive
+
+Every draw shows the screening arm averting preterm births and low-birth-weight cases relative to SOC, averaging around 30 DALYs averted per simulated cohort (always positive). The cost side ranges widely: roughly \$42k to \$306k additional per cohort, depending on how treatment reversibility, growth penalties, and unit costs align.
+
+| Quantity | Median | Mean | Range |
+|----------|--------|------|-------|
+| ΔDALYs averted (cohort) | 29 | 30 | 3 – 60 |
+| ΔCosts (cohort, USD) | \$147k | \$156k | \$42k – \$306k |
+| ICER (\$/DALY averted) | \$5,151 | \$5,954 | \$1,318 – \$35,012 |
+
+: Distribution of incremental health gains, costs, and ICERs across the 200 draws. Values are per simulated cohort of ~3,900 deliveries over 2027–2040. {#tbl-icer}
+
+![Net monetary benefit across the 200 draws at four willingness-to-pay thresholds. Red = not cost-effective (NMB<0), green = cost-effective (NMB>0).](figures/fig1_nmb.png){#fig-nmb}
+
+![Cost-effectiveness plane. Each point is one draw; dashed lines are WTP thresholds at \$500, \$1,000, \$2,000/DALY. All draws sit well above the \$2,000 threshold, indicating ICERs above that value across the parameter space.](figures/fig2_ceplane.png){#fig-ceplane}
+
+### Confidence in the recommendation depends mostly on the WTP threshold
+
+![CEAC and EVPI curves. At Zimbabwe's GDP per capita (~\$1,500), P(CE) is near zero and EVPI is negligible. The decision becomes genuinely uncertain only between \$3,000 and \$7,000/DALY, where EVPI peaks at ~\$28k per cohort. At higher WTPs the decision becomes clearly favourable again.](figures/fig_ceac.png){#fig-ceac}
+
+| Willingness to pay | P(CE) | E[NMB] per cohort |
+|--------------------|-------|---------------------|
+| \$1,000 / DALY | 0.0% | −\$125,611 |
+| \$2,000 / DALY | 4.0% | −\$95,328 |
+| \$3,000 / DALY | 15.0% | −\$65,044 |
+| \$5,000 / DALY | 47.0% | −\$4,476 |
+| \$10,000 / DALY | 89.5% | +\$146,942 |
+
+: Decision outcomes at representative WTP thresholds. {#tbl-ce}
+
+The shape of the EVPI curve is the central finding for the VoI framing. At any plausible Zimbabwe WTP, the decision is already resolved (in favour of SOC) *under the current evidence base*, so additional evidence, however valuable scientifically, has near-zero decision value. The decision becomes sensitive to evidence only near the indifference point around \$5,000/DALY, and becomes insensitive again beyond \$8,000.
+
+### Where the decision-relevant uncertainty lives
+
+![EVPPI by parameter group at \$5,000/DALY WTP (the indifference point where uncertainty is maximal). Cost parameters dominate, but all groups carry meaningful weight; there is no single bottleneck.](figures/fig3_evppi.png){#fig-evppi}
+
+![EVPPI across a range of WTPs. All parameter groups rise together to a peak around \$5,000 then fall, tracking the EVPI curve. The ranking is broadly stable: costs at the top, with treatment reversibility and growth penalties close behind.](figures/fig_evppi_wtps.png){#fig-evppi-wtps}
+
+At \$5,000/DALY:
+
+* **Cost parameters** top the ranking (~\$22.7k per cohort), driven in substantial part by the width of the placeholder priors. Some of this value therefore reflects what we don't know because we haven't looked up Zimbabwe cost data, not intrinsic biological uncertainty.
+* **Treatment reversibility** in the first and second trimesters (~\$17k, ~\$16.5k) is next. This is the class of parameter most directly within PROMISE's scope to inform.
+* **Growth penalties** (~\$15.7k) and **delivery-timing shifts** (~\$15.1k) are close behind.
+* **Epidemiological uncertainty** that survives calibration (~\$12.5k–\$15.2k) contributes meaningfully but is not dominant.
+
+No parameter group stands out as a clear single priority for additional evidence collection. At WTPs in the indifference region, a trial that addressed reversibility alone would reduce but not eliminate the residual decision uncertainty.
+
+## Caveats
+
+1. **Cost priors are not Zimbabwe-grounded.** All eight cost distributions are placeholders. This has two effects: the magnitude of the overall ΔCost is not yet credible, and the EVPPI attributed to cost parameters partially reflects our ignorance of the local cost structure rather than a structural feature of the decision problem. Replacing these with costed PROMISE data or published Zimbabwe unit costs is the first required upgrade.
+2. **Fixed diagnostic performance.** POC test sensitivity and specificity are fixed at 95/95. The VoI loop does not include uncertainty around test performance because SOC has no screening in this comparison; adding it would matter more for scenarios comparing different POC tests.
+3. **Cohort-scale values.** NMB, EVPI, and EVPPI are reported per simulated cohort (~3,900 deliveries over 13 years), not per woman and not scaled to the Zimbabwe national population. The scale factor is approximately 1,000× to the full population. ICERs and probabilities of cost-effectiveness are scale-invariant and can be read directly.
+4. **One intervention arm shown.** The present analysis compares SOC only against the `twice`-screen PROMISE arm. The `enroll`-only, `tri3`-only, and `partner_tx` arms are implemented but not yet folded into the VoI loop.
+5. **Model structure is fixed.** Structural uncertainty (for example, whether the delivery-timing-shift mechanism is a good representation of how STIs cause PTB, or whether co-infection interactions matter more than implemented) is not captured by the parameter priors used here.
+
+## Next steps
+
+* **Replace cost placeholders** with Zimbabwe-specific unit costs (POC test, treatments, ANC marginal cost, PTB/LBW management). This will both tighten ΔCost and change the EVPPI ranking.
+* **Threshold analysis**: by how much would each cost component need to fall (or each effect parameter need to strengthen) to shift the 50% P(CE) crossover down to a plausible Zimbabwe WTP?
+* **Expected value of sample information (EVSI)** for proposed PROMISE trial designs: which subset of parameters could PROMISE realistically resolve, and what is the decision-relevant value of resolving them at each plausible WTP?
+* **Multi-arm VoI**: extend the analysis to include `enroll`, `tri3`, and `partner_tx` so the decision space is not binary.
+
+## Discussion prompts
+
+* Does the parameter partition (calibrate epi, hold birth-outcome and cost at priors) match our intuition about what prevalence data can and cannot identify? Are there other parameters that should move from calibrated to prior, or vice versa?
+* Are there Zimbabwe-specific cost data sources we should pull in before the next iteration?
+* Is the WTP anchor of \$1,500 (1× GDP per capita) the right reference point for us, or should we reframe around a different Zimbabwe-specific benchmark (e.g. MoH per-DALY budget shadow price, opportunity-cost thresholds from published LMIC work)?
+* For the EVSI step: which specific PROMISE endpoints would we expect to be most trial-realistic to resolve: effect on PTB, effect on birth weight, cost per test, or something else?

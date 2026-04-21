@@ -96,17 +96,23 @@ These parameters are NOT informed by the STIsim calibration. The epi model tells
 
 ### 3a. How birth outcomes work in the model
 
-The `FetalHealth` module uses a mechanistic approach with two separate damage pathways:
+The `FetalHealth` module (`starsim.demographics.FetalHealth`) is a generic Starsim module that tracks fetal health during pregnancy via two damage pathways. It registers conception and delivery callbacks with the Pregnancy module. All disease-specific logic lives in the `sti_fetal` connector, which calls FetalHealth's public API.
 
-1. **Delivery timing (→ PTB)**: When a pregnant woman acquires an STI, her delivery date is shifted earlier by a stochastic amount drawn from a lognormal distribution. The mean shift depends on the pathogen (Ng shifts more than Ct or Tv). This is currently a one-way ratchet — reinfection compounds the shift, and treatment may or may not partially reverse it. A birth is classified as preterm if delivery occurs before 37 weeks' gestation.
+**Architecture:**
+- `FetalHealth` (generic, in Starsim): tracks `timing_shift`, `growth_restriction`, and `weight_percentile` per agent. Provides `apply_timing_shift()`, `apply_growth_restriction()`, `reverse_timing_shift()`, `reverse_growth_restriction()`. At delivery, calls `compute_birth_weight()` to classify PTB/LBW/SGA.
+- `sti_fetal` connector (disease-specific, in this repo): registers a conception callback to handle pre-existing infections. In `step()`, monitors new infections and treatments in pregnant women, calling FetalHealth's API. Holds all pathogen-specific parameters (shifts, penalties, reversibility).
 
-2. **Fetal growth restriction (→ LBW/SGA)**: Each infection accumulates a growth penalty that reduces birth weight as a fraction of the gestational-age-appropriate weight. Treatment partially reverses this penalty, but leaves a residual. Birth weight is computed at delivery as: `baseline_weight_for_GA × individual_percentile × (1 − growth_restriction)`. A birth is classified as LBW if birth weight < 2500g, and SGA if below the 10th percentile for gestational age.
+**Two damage pathways:**
+
+1. **Delivery timing (→ PTB)**: When a pregnant woman acquires an STI, the `sti_fetal` connector shifts her delivery date earlier by a stochastic amount drawn from a lognormal distribution. The mean shift depends on the pathogen (Ng shifts more than Ct or Tv). Reinfection compounds the shift. Treatment can partially reverse the timing shift, with reversibility depending on gestational age at treatment. A birth is classified as preterm if delivery occurs before 37 weeks' gestation.
+
+2. **Fetal growth restriction (→ LBW/SGA)**: Each infection accumulates a growth penalty that reduces birth weight as a fraction of the gestational-age-appropriate weight. Treatment partially reverses this penalty, but leaves a residual that depends on gestational age at treatment (early treatment recovers more). Birth weight is computed at delivery as: `baseline_weight_for_GA × individual_percentile × (1 − growth_restriction)`. A birth is classified as LBW if birth weight < 2500g, and SGA if below the 10th percentile for gestational age.
 
 This mechanistic approach is richer than a simple probability/RR model because outcomes emerge from the interaction of infection timing, treatment timing, baseline fetal growth trajectory, and gestational age. It also means the VoI analysis runs pairs of full simulations (SOC vs. intervention) for each parameter draw, rather than replaying event logs post-hoc.
 
-**Two infection timing scenarios to handle:**
-- **Pre-existing infection at conception**: A woman already infected when she becomes pregnant. FetalHealth applies infection effects at conception via `on_conception()`. If treated early (≤24w), use early reversibility parameters; if treated late, use late parameters; if untreated, full damage applies at delivery.
-- **New infection during pregnancy**: FetalHealth applies infection effects when the infection is acquired, via the `sti_fetal` connector. Same reversibility logic based on gestational age at treatment.
+**Two infection timing scenarios handled:**
+- **Pre-existing infection at conception**: The `sti_fetal` connector registers a conception callback with FetalHealth. When a woman becomes pregnant, the callback checks each disease for existing infections and applies damage immediately.
+- **New infection during pregnancy**: The connector's `step()` method checks `disease.ti_infected == ti` each timestep and applies damage to newly infected pregnant women. Similarly, it checks `tx.ti_treated == ti` to detect treatments and apply partial reversal based on gestational age (early ≤24w uses `tx_residual_*_early`, late uses `tx_residual_*_late`).
 
 ### 3b. Delivery timing shift parameters (→ preterm birth)
 
@@ -314,34 +320,45 @@ Use regression-based EVSI (Heath et al. 2020). Prioritize EVPI and EVPPI first; 
 
 ## Step 7: Figures and Reporting
 
-### Figure 1: Prior predictive distribution of incremental NMB
-- Histogram colored green (NMB > 0) / red (NMB < 0), at multiple WTP thresholds
+### Figure 1: Prior predictive distribution of incremental NMB (`plot_fig1_nmb.py`) ✓
+- 4 panels at WTP = $100, $500, $1000, $2000/DALY
+- Histogram colored green (NMB > 0, cost-effective) / red (NMB < 0, not CE)
+- Annotated with P(CE) and E[NMB] per panel
 - Key message: quantifies current decision uncertainty
 
-### Figure 2: Cost-effectiveness plane
-- Scatter of (ΔDALYs, ΔCosts) with WTP line
+### Figure 2: Cost-effectiveness plane (`plot_fig2_ceplane.py`) ✓
+- Scatter of (ΔDALYs averted, ΔCosts) across all parameter draws
+- WTP threshold lines at $500, $1000, $2000
+- Points colored by CE status at middle WTP, quadrant labels
 - Key message: joint uncertainty in costs and effects
 
-### Figure 3: EVPPI tornado chart
-- Horizontal bars sorted by EVPPI value
+### Figure 3: EVPPI tornado chart (`plot_fig3_evppi.py`) ✓
+- Horizontal bars sorted by EVPPI value for 9 parameter groups
+- Color-coded: blue (epi), green (birth outcome), tan (cost)
+- EVPI reference line for context
+- Uses gradient-boosted regression with 5-fold cross-validation (Strong et al. 2014)
 - Key message: which parameters drive decision uncertainty. Do reversibility or cost parameters dominate?
 
-### Figure 4: Prior and posterior parameter distributions (8×4 panel grid)
-- Epi parameters: prior (light) + posterior (dark). Birth outcome and cost: prior only, labeled.
+### Figure 4: Prior and posterior parameter distributions (`plot_fig4_priors_posteriors.py`) ✓
+- Panel A (3×4): Calibrated epi parameters — uniform prior (light) + KDE posterior (dark)
+- Panel B (3×4): Birth outcome priors — delivery shifts, growth penalties, treatment reversibility
+- Panel C (2×4): Cost priors (flagged as placeholders with *)
 - Key message: what we know vs. don't know
 
-### Figure 5: Threshold analysis heatmap
+### Figure 5: Threshold analysis heatmap (TODO)
 - NMB over 2 high-EVPPI parameter pairs, with decision boundary
 - Key message: where the decision changes
+- Implementation: depends on which parameter groups have highest EVPPI from Fig 3
 
-### Figure 6: EVPI and EVSI curves
-- EVPI and EVSI vs. WTP threshold, with uncertainty band on EVSI
+### Figure 6: EVPI and EVSI curves (TODO)
+- EVPI vs. WTP threshold — can be plotted directly from `voi_evpi.df`
+- EVSI vs. WTP — requires regression-based EVSI (Heath et al. 2020), can be bounded by EVPI initially
 - Key message: value of the PROMISE trial's information
 
-### Supplementary: Calibration diagnostics
-- Model vs. data for each target
-- Optuna convergence
-- Pairwise posterior correlations
+### Supplementary figures ✓
+- `plot_hiv_calibration.py` — HIV calibration validation (2×3: prevalence, infections, ART, PLHIV, deaths, population)
+- `plot_sti_epi.py` — STI prevalence by age/sex + time series (2×3: NG, CT, TV)
+- `plot_network.py` — Network structure (2×3: lifetime partners, age mixing, risk groups, debut, partnerships, condom use)
 
 ---
 
@@ -349,47 +366,89 @@ Use regression-based EVSI (Heath et al. 2020). Prioritize EVPI and EVPPI first; 
 
 ### Completed
 
-- [x] **Step 1**: Epidemiological parameters defined (15 calib_pars)
-- [x] **Step 2 infrastructure**: `run_calibrations.py` working — dot-notation parameter routing, scalar `set_pars` fix in stisim, CSV column names updated to dot notation, weights dict updated
-- [x] **Step 3 (plan)**: Prior parameters defined in this document (stillbirths dropped)
-- [x] **Step 4a**: `FetalHealth` module (`fetal_health.py`) — tracks fetal growth restriction and PTB shift during pregnancy, classifies birth outcomes at delivery
-  - Bug fixed: GA computation uses `ti_delivery - ti_pregnant` (actual) not `dur_pregnancy` (scheduled)
-  - Bug fixed: delivery detection uses `(ti_delivery == ti) & ~pregnant` (analyzers run after pregnancy.step clears pregnant)
+- [x] **Step 1**: Epidemiological parameters defined (15 calib_pars in `priors.py`)
+- [x] **Step 2**: Calibration infrastructure and execution
+  - `run_calibrations.py` working — dot-notation parameter routing, scalar `set_pars` fix in stisim
+  - Full calibration run complete (~2000 Optuna trials). Top 200 parameter sets saved to `results/zimbabwe_pars.df`
+  - `run_msim.py` runs top 200 pars → percentile stats for validation
+- [x] **Step 3**: Prior distributions defined and implemented
+  - All prior-only parameters codified in `priors.py` with `sample_priors()` helper
+  - Birth outcome priors: 4 delivery timing shifts, 3 growth penalties, 4 treatment reversibility
+  - Cost priors: 8 parameters (all placeholders — need Zimbabwe-specific data)
+  - DALY weights fixed at GBD 2019 values
+  - Stillbirths dropped from scope
+- [x] **Step 4a**: `FetalHealth` module — **upstreamed to Starsim** (`starsim.demographics.FetalHealth`)
+  - Now a proper `ss.Module` (not an analyzer), registered with Pregnancy via conception/delivery callbacks
+  - Tracks fetal growth restriction and PTB shift during pregnancy, classifies birth outcomes at delivery
+  - Public API: `apply_timing_shift()`, `apply_growth_restriction()`, `reverse_timing_shift()`, `reverse_growth_restriction()`
+  - Results: `n_deliveries`, `n_preterm`, `n_lbw`, `n_sga`, `mean_birth_weight`, `mean_ga_at_birth`, `preterm_rate`, `lbw_rate`
+  - Starsim PR: https://github.com/starsimhub/starsim/pull/1244 (branch: `fetal-health`)
+  - Test in `starsim/tests/test_demographics.py::test_fetal_health` covers baseline, disease, and treatment scenarios
 - [x] **Step 4b**: `sti_fetal` connector (`connectors.py`) — routes new infections and treatments in pregnant women to FetalHealth
+  - Registers conception callback to handle pre-existing infections at start of pregnancy
+  - `step()` checks for new infections and new treatments each timestep
+  - Treatment reversibility depends on gestational age (early ≤24w vs late) with separate residual parameters for growth and timing
+  - All birth outcome parameters (`ptb_shift_mean`, `growth_penalty`, `tx_residual_*`) are constructor arguments, overridable per VoI draw via `connector_pars` in `make_sim()`
 - [x] **Step 4c**: `birth_outcome_dalys` analyzer (`analyzers.py`) — computes YLD from PTB and LBW at delivery
   - Bug fixed: `cum_dalys` computed in `finalize()` via `np.cumsum`, not inline (early-return skipped non-delivery timesteps)
   - Note: `yld_lbw` is effectively 0 because nearly all LBW births are also PTB in this model (preterm infants are mechanically <2500g). DALYs are driven by PTB count. This is epidemiologically correct.
-- [x] **Step 4d**: `intervention_costs` analyzer (`analyzers.py`) — tracks screening, treatment, and adverse outcome management costs
+- [x] **Step 4d**: `intervention_costs` analyzer (`analyzers.py`) — tracks screening, treatment, partner notification, and adverse outcome management costs
   - Bug fixed: `cum_cost` computed in `finalize()` via `np.cumsum` (same early-return fix as cum_dalys)
-- [x] **Model integration**: `model.py` `make_sim()` includes FetalHealth + sti_fetal connector by default; DALY and cost analyzers passed as `extra_analyzers` for VoI runs
+  - All unit cost parameters are constructor arguments, overridable per VoI draw
+- [x] **Model integration**: `model.py` `make_sim()` includes FetalHealth (via `custom=`) + sti_fetal connector by default; DALY and cost analyzers passed as `extra_analyzers` for VoI runs; `connector_pars` argument allows overriding birth outcome parameters per draw
+- [x] **Step 5**: `run_voi.py` built and running
+  - Loads calibration posterior (top 200 from `zimbabwe_pars.df`)
+  - Samples birth outcome + cost parameters from priors per draw
+  - Builds SOC + intervention (twice) sim pairs with shared seed (CRN)
+  - Applies calibrated epi parameters via `set_sim_pars()`
+  - Computes ΔDALYs and ΔCosts per draw
+  - Stores all parameter values per draw for EVPPI regression
+  - Outputs: `voi_draws.df`, `voi_evpi.df`
+- [x] **Step 6a**: EVPI computed from NMB samples across 7 WTP thresholds ($50–$5000)
+  - Implemented in `compute_evpi()` within `run_voi.py`
+- [x] **Step 6b**: EVPPI implemented via gradient-boosted regression (Strong et al. 2014)
+  - `plot_fig3_evppi.py` computes EVPPI for 9 parameter groups using cross-validated GBR
+  - Groups: network structure, NG/CT/TV transmission, delivery timing shifts, growth penalties, early/late treatment reversibility, cost parameters
+- [x] **Step 7 (partial)**: Figure scripts written
+  - `plot_fig1_nmb.py` — NMB histograms at 4 WTP thresholds, colored green/red
+  - `plot_fig2_ceplane.py` — Cost-effectiveness plane scatter with WTP lines
+  - `plot_fig3_evppi.py` — EVPPI tornado chart with EVPI reference line
+  - `plot_fig4_priors_posteriors.py` — Prior and posterior parameter distributions (8×4 grid)
+  - Supplementary: `plot_hiv_calibration.py`, `plot_sti_epi.py`, `plot_network.py`
+- [x] **Interventions**: Full PROMISE intervention suite implemented in `interventions.py`
+  - `SyndromicMgmt`: syndromic management of VDS/UDS (SOC)
+  - `ANCScreen`: GA-windowed ANC screening with per-disease sensitivity/specificity
+  - `STIPartnerNotification`: notify/treat partners of ANC-positive women
+  - `make_testing()`: factory assembles all interventions for a given scenario
+  - 5 scenarios: soc, enroll, tri3, twice, partner_tx
 
 ### Design decisions made
 
 - **Stillbirths dropped from scope**: Focus on PTB and LBW (and SGA). Simplifies model and parameter space.
 - **PTB vs LBW double-counting**: PTB+LBW co-occurrences accrue PTB disability weight only. In practice, nearly all LBW is PTB-driven in the mechanistic model.
-- **FetalHealth is an analyzer, not a module**: Added via `analyzers=` list so it runs at func_order ~97 (after pregnancy.step processes deliveries).
+- **FetalHealth is a Starsim Module, not an analyzer**: Upstreamed to `starsim.demographics.FetalHealth`. Added via `custom=` so it registers conception/delivery callbacks with Pregnancy. This is generic infrastructure reusable by any Starsim model with pregnancy.
+- **Connector-based treatment reversal**: The `sti_fetal` connector handles both infection damage and treatment reversal in its `step()` method. No new callback machinery was needed in FetalHealth — the connector checks `tx.ti_treated == ti` for newly treated pregnant women and calls `fh.reverse_growth_restriction()` / `fh.reverse_timing_shift()`. This keeps FetalHealth generic while the connector holds all disease-specific logic.
 - **Mechanistic model over post-hoc replay**: FetalHealth mechanistically shifts delivery timing and accumulates growth restriction. Birth outcome parameters affect sim dynamics (e.g., larger PTB shift → delivery before third-trimester screen), so each parameter draw requires a full sim pair. This is more expensive than post-hoc replay but preserves the mechanistic interactions that make the ABM valuable.
 - **POC test fixed at 95/95**: Not in the VoI parameter space.
 - **HIV parameters fixed at posterior**: Calibrated but not propagated into VoI uncertainty.
+- **CRN for variance reduction**: SOC and intervention sims share a random seed per draw, so incremental differences reflect the intervention effect rather than stochastic noise.
+- **Cost parameters don't affect dynamics**: They only enter the NMB calculation. In principle they could be swept post-hoc, but for simplicity they are sampled per draw alongside epi parameters.
+
+### In progress
+
+- [ ] **VoI runs on VMs**: `run_voi.py` running with 200 draws (400 sim runs). Awaiting completion.
 
 ### Next steps
 
-- [ ] **Smoke test end-to-end**: Run SOC and intervention scenarios with DALY and cost analyzers attached, verify outputs
-- [ ] **Wire FetalHealth to accept uncertain parameters at runtime**: The mechanistic parameters (ptb_shift_mean, growth_penalty, treatment_residual) are currently hardcoded constants. They need to accept values from the prior draws. Specifically:
-  - `ptb_shift_mean` dict (ng, ct, tv) → from `ptb_shift_ng/ct/tv` priors
-  - `ptb_shift_std` → from `ptb_shift_std` prior
-  - `growth_penalty` dict (ng, ct, tv) → from `growth_penalty_ng/ct/tv` priors
-  - `treatment_residual` → replaced by `tx_residual_growth_early/late` and `tx_residual_timing_early/late`
-  - This requires modifying `apply_treatment_effects()` to accept gestational age and select early vs. late residual
-  - Also requires modifying `apply_treatment_effects()` to optionally reverse delivery timing shift (relaxing the one-way ratchet)
-- [ ] **Step 2**: Run full calibration (~500-2000 Optuna trials) on VMs
-- [ ] **Step 5**: Build `run_voi.py` — loads calibration posterior (top 200), samples birth outcome + cost parameters per posterior draw, builds SOC + intervention sim pairs with CRN, runs with analyzers, computes INMB
-- [ ] **Step 6a**: EVPI from NMB samples
-- [ ] **Step 6b**: EVPPI via nonparametric regression (Strong et al. 2014)
-- [ ] **Step 6c**: EVSI (can be bounded by EVPI initially)
-- [ ] **Step 7**: Figures 1-6 + supplementary calibration diagnostics
+- [ ] **Review VoI outputs**: Inspect `voi_draws.df` and `voi_evpi.df` for plausibility — are ΔDALYs and ΔCosts in reasonable ranges?
+- [ ] **Generate Figures 1-4**: Run plot scripts once VoI results are available
+- [ ] **Figure 5 (threshold analysis heatmap)**: Not yet implemented — NMB over 2 high-EVPPI parameter pairs
+- [ ] **Figure 6 (EVPI/EVSI curves)**: EVPI curve can be plotted from `voi_evpi.df`; EVSI not yet implemented (can be bounded by EVPI)
+- [ ] **Step 6c**: EVSI via regression-based method (Heath et al. 2020) — lower priority, bounded by EVPI
+- [ ] **Scale up**: Increase from 200 to 1000+ draws for stable EVPPI estimates
 - [ ] Collect Zimbabwe-specific cost data to replace placeholders
 - [ ] Get clinical input on treatment reversibility framing (especially timing ratchet)
+- [ ] Run validation plots once `run_msim.py` calib stats are available on VMs
 
 ---
 
@@ -411,6 +470,9 @@ Use regression-based EVSI (Heath et al. 2020). Prioritize EVPI and EVPPI first; 
 
 ## Dependencies and Setup
 
-The analysis requires STIsim and dependencies (Starsim), Optuna for calibration, and standard scientific Python (scipy, numpy, pandas, matplotlib). The `stisim_vddx_zim` example is the starting template.
-
-For EVPPI: pygam (GAM per Strong et al. 2014) or scikit-learn (gradient-boosted regression).
+- **starsim** (`fetal-health` branch) — includes `FetalHealth` module in demographics
+- **stisim** (`prep-uplift` branch) — calibration API (`set_sim_pars`, `make_calib_sims`), disease modules, interventions
+- **sciris** (>=3.1.6) — utilities, parallelization, file I/O
+- **optuna** — Bayesian calibration
+- **scikit-learn** — gradient-boosted regression for EVPPI (Strong et al. 2014)
+- Standard scientific Python: scipy, numpy, pandas, matplotlib, seaborn

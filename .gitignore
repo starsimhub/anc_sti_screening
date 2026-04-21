@@ -9,11 +9,20 @@ build/
 results/*.obj
 results/*.df
 results/*.zip
+# Keep small tracked .df results and their metadata sidecars (exceptions below)
+!results/voi_draws.df
+!results/voi_evpi.df
+!results/zimbabwe_pars.df
+!results/*.meta.json
 
 # Figures (regenerable)
 figures/*.png
 figures/*.pdf
 figures/*.svg
+
+# Rendered Quarto output (regenerable via `quarto render`)
+*.html
+*_files/
 
 # IDE
 .idea/
