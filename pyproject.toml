@@ -1,0 +1,20 @@
+[project]
+name = "anc-sti-screening"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "stisim",
+    "starsim>=3.2.0",
+    "sciris>=3.1.6",
+    "pandas",
+    "numpy",
+    "scipy",
+    "optuna",
+    "seaborn",
+    "scikit-learn",
+    "matplotlib",
+]
+
+[tool.uv.sources]
+stisim = { git = "https://github.com/starsimhub/stisim" }
+starsim = { git = "https://github.com/starsimhub/starsim" }

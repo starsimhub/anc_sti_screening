@@ -176,10 +176,10 @@ class birth_outcome_dalys(ss.Analyzer):
     def init_results(self):
         super().init_results()
         self.define_results(
-            ss.Result('n_deliveries',  dtype=int,   label='Deliveries'),
-            ss.Result('n_ptb',         dtype=int,   label='Preterm births'),
-            ss.Result('n_lbw',         dtype=int,   label='LBW births'),
-            ss.Result('n_ptb_lbw',     dtype=int,   label='PTB + LBW'),
+            ss.Result('n_deliveries',  dtype=int,   scale=False, label='Deliveries'),
+            ss.Result('n_ptb',         dtype=int,   scale=False, label='Preterm births'),
+            ss.Result('n_lbw',         dtype=int,   scale=False, label='LBW births'),
+            ss.Result('n_ptb_lbw',     dtype=int,   scale=False, label='PTB + LBW'),
             ss.Result('yld_ptb',       scale=False, label='YLD — preterm birth'),
             ss.Result('yld_lbw',       scale=False, label='YLD — LBW only'),
             ss.Result('dalys',         scale=False, label='DALYs'),
@@ -284,10 +284,10 @@ class intervention_costs(ss.Analyzer):
     def init_results(self):
         super().init_results()
         self.define_results(
-            ss.Result('n_screened',      dtype=int,   label='Women screened (ANC)'),
-            ss.Result('n_treated_ng',    dtype=int,   label='NG treatments'),
-            ss.Result('n_treated_ct',    dtype=int,   label='CT treatments'),
-            ss.Result('n_treated_tv',    dtype=int,   label='TV treatments'),
+            ss.Result('n_screened',      dtype=int,   scale=False, label='Women screened (ANC)'),
+            ss.Result('n_treated_ng',    dtype=int,   scale=False, label='NG treatments'),
+            ss.Result('n_treated_ct',    dtype=int,   scale=False, label='CT treatments'),
+            ss.Result('n_treated_tv',    dtype=int,   scale=False, label='TV treatments'),
             ss.Result('cost_screening',  scale=False, label='Screening costs ($)'),
             ss.Result('cost_treatment',  scale=False, label='Treatment costs ($)'),
             ss.Result('cost_outcomes',   scale=False, label='Adverse outcome management costs ($)'),
