@@ -163,14 +163,23 @@ class birth_outcome_dalys(ss.Analyzer):
         super().init_pre(sim)
         if self.start is None:
             self.start = sim.t.yearvec[0]
+        self._newborn_uids = ss.uids()
+        preg = sim.demographics.pregnancy
+        preg.add_delivery_callback(self._cache_newborns)
+        return
+
+    def _cache_newborns(self, mother_uids, newborn_uids):
+        """ Cache newborn UIDs from delivery callback for use in step() """
+        self._newborn_uids = newborn_uids
+        return
 
     def init_results(self):
         super().init_results()
         self.define_results(
-            ss.Result('n_deliveries',  dtype=int,   label='Deliveries'),
-            ss.Result('n_ptb',         dtype=int,   label='Preterm births'),
-            ss.Result('n_lbw',         dtype=int,   label='LBW births'),
-            ss.Result('n_ptb_lbw',     dtype=int,   label='PTB + LBW'),
+            ss.Result('n_deliveries',  dtype=int,   scale=False, label='Deliveries'),
+            ss.Result('n_ptb',         dtype=int,   scale=False, label='Preterm births'),
+            ss.Result('n_lbw',         dtype=int,   scale=False, label='LBW births'),
+            ss.Result('n_ptb_lbw',     dtype=int,   scale=False, label='PTB + LBW'),
             ss.Result('yld_ptb',       scale=False, label='YLD — preterm birth'),
             ss.Result('yld_lbw',       scale=False, label='YLD — LBW only'),
             ss.Result('dalys',         scale=False, label='DALYs'),
@@ -184,21 +193,20 @@ class birth_outcome_dalys(ss.Analyzer):
         if sim.t.yearvec[ti] < self.start:
             return
 
+        newborn_uids = self._newborn_uids
+        self._newborn_uids = ss.uids()  # Reset for next step
+        if not len(newborn_uids):
+            return
+
         try:
             fh = sim.custom['fetal_health']
         except (KeyError, AttributeError):
             return
 
-        preg = sim.people.pregnancy
-        # Pregnancy.step() clears pregnant before analyzers run; just-delivered women
-        # are identified by ti_delivery == ti and not pregnant
-        delivering = (preg.ti_delivery == ti) & ~preg.pregnant
-        if not delivering.any():
-            return
-
-        uids = delivering.uids
-        is_ptb = np.asarray(fh.is_preterm[uids], dtype=bool)
-        is_lbw = np.asarray(fh.is_lbw[uids], dtype=bool)
+        # Read birth outcomes from newborns (preterm from Pregnancy, lbw from FetalHealth)
+        preg   = sim.people.pregnancy
+        is_ptb = preg.preterm[newborn_uids]
+        is_lbw = fh.lbw[newborn_uids]
 
         n_ptb     = int(np.sum(is_ptb))
         n_lbw     = int(np.sum(is_lbw))
@@ -211,7 +219,7 @@ class birth_outcome_dalys(ss.Analyzer):
         yld_lbw = n_lbw_only * self.dw_lbw * self.dur_lbw
         dalys   = yld_ptb + yld_lbw
 
-        self.results['n_deliveries'][ti] = len(uids)
+        self.results['n_deliveries'][ti] = len(newborn_uids)
         self.results['n_ptb'][ti]        = n_ptb
         self.results['n_lbw'][ti]        = n_lbw
         self.results['n_ptb_lbw'][ti]    = n_ptb_lbw
@@ -219,8 +227,8 @@ class birth_outcome_dalys(ss.Analyzer):
         self.results['yld_lbw'][ti]      = yld_lbw
         self.results['dalys'][ti]        = dalys
 
-    def finalize(self):
-        super().finalize()
+    def finalize_results(self):
+        super().finalize_results()
         self.results['cum_dalys'][:] = np.cumsum(self.results['dalys'].values)
 
 
@@ -276,10 +284,10 @@ class intervention_costs(ss.Analyzer):
     def init_results(self):
         super().init_results()
         self.define_results(
-            ss.Result('n_screened',      dtype=int,   label='Women screened (ANC)'),
-            ss.Result('n_treated_ng',    dtype=int,   label='NG treatments'),
-            ss.Result('n_treated_ct',    dtype=int,   label='CT treatments'),
-            ss.Result('n_treated_tv',    dtype=int,   label='TV treatments'),
+            ss.Result('n_screened',      dtype=int,   scale=False, label='Women screened (ANC)'),
+            ss.Result('n_treated_ng',    dtype=int,   scale=False, label='NG treatments'),
+            ss.Result('n_treated_ct',    dtype=int,   scale=False, label='CT treatments'),
+            ss.Result('n_treated_tv',    dtype=int,   scale=False, label='TV treatments'),
             ss.Result('cost_screening',  scale=False, label='Screening costs ($)'),
             ss.Result('cost_treatment',  scale=False, label='Treatment costs ($)'),
             ss.Result('cost_outcomes',   scale=False, label='Adverse outcome management costs ($)'),
@@ -338,8 +346,8 @@ class intervention_costs(ss.Analyzer):
         self.results['cost_outcomes'][ti]  = cost_outcomes
         self.results['total_cost'][ti]     = total_cost
 
-    def finalize(self):
-        super().finalize()
+    def finalize_results(self):
+        super().finalize_results()
         self.results['cum_cost'][:] = np.cumsum(self.results['total_cost'].values)
 
     def _count_treatments(self, sim, tx_name, disease_name):

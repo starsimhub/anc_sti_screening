@@ -29,6 +29,7 @@ from model import make_sim
 from analyzers import birth_outcome_dalys, intervention_costs
 from priors import sample_priors
 from stisim.calibration import set_sim_pars
+from version_utils import save_with_meta
 
 # Constants
 LOCATION = 'zimbabwe'
@@ -54,21 +55,27 @@ def load_posterior(n_top=200):
 def make_connector_pars(draw):
     """Build sti_fetal connector pars from sampled birth outcome parameters."""
     return dict(
-        ptb_shift_mean=dict(
+        ptb_shift_mean=sc.objdict(
             ng=float(draw['ptb_shift_ng']),
             ct=float(draw['ptb_shift_ct']),
             tv=float(draw['ptb_shift_tv']),
         ),
         ptb_shift_std=float(draw['ptb_shift_std']),
-        growth_penalty=dict(
+        growth_penalty=sc.objdict(
             ng=float(draw['growth_penalty_ng']),
             ct=float(draw['growth_penalty_ct']),
             tv=float(draw['growth_penalty_tv']),
         ),
-        tx_residual_growth_early=float(draw['tx_residual_growth_early']),
-        tx_residual_growth_late=float(draw['tx_residual_growth_late']),
-        tx_residual_timing_early=float(draw['tx_residual_timing_early']),
-        tx_residual_timing_late=float(draw['tx_residual_timing_late']),
+        tx_residual_growth=sc.objdict(
+            tri1=float(draw['tx_residual_growth_tri1']),
+            tri2=float(draw['tx_residual_growth_tri2']),
+            tri3=float(draw['tx_residual_growth_tri3']),
+        ),
+        tx_residual_timing=sc.objdict(
+            tri1=float(draw['tx_residual_timing_tri1']),
+            tri2=float(draw['tx_residual_timing_tri2']),
+            tri3=float(draw['tx_residual_timing_tri3']),
+        ),
     )
 
 
@@ -139,6 +146,7 @@ def extract_outcomes(sim):
 
 def run_single_draw(i, epi_pars, draw, seed):
     """Run one SOC + intervention pair and return results."""
+    T = sc.timer()
     sim_soc, sim_intv = make_sim_pair(epi_pars, draw, seed)
 
     sim_soc.run()
@@ -163,6 +171,8 @@ def run_single_draw(i, epi_pars, draw, seed):
     for k, v in draw.items():
         row[k] = float(v)
 
+    elapsed = T.toc(output=True)
+    print(f'  Draw {i}: ΔDALYs={delta_dalys:+.3f}, ΔCosts=${delta_costs:+,.0f} ({elapsed:0.1f}s)')
     return row
 
 
@@ -193,6 +203,8 @@ def run_voi(n_draws=N_DRAWS, parallel=True):
     """
     Run the full VoI outer loop.
     """
+    T = sc.timer()
+
     posterior = load_posterior()
     n_posterior = len(posterior)
     print(f'Loaded {n_posterior} posterior parameter sets')
@@ -200,8 +212,30 @@ def run_voi(n_draws=N_DRAWS, parallel=True):
     # Sample birth outcome + cost parameters
     prior_draws = sample_priors(n=n_draws, seed=42)
     print(f'Sampled {n_draws} prior draws')
+    print(f'Running {n_draws} draws × 2 sims = {n_draws * 2} total sims '
+          f'({SOC_SCENARIO} vs {INTV_SCENARIO}, {START}–{STOP}, CRN)')
 
-    all_rows = []
+    # Time a single draw to estimate total runtime
+    print('\nTiming first draw...')
+    T0 = sc.timer()
+    par_idx = 0
+    epi_pars_0 = posterior.iloc[par_idx].to_dict()
+    draw_0 = {k: v[0] for k, v in prior_draws.items()}
+    row_0 = run_single_draw(0, epi_pars_0, draw_0, seed=1000)
+    t_one = T0.toc(output=True)
+
+    if parallel:
+        import multiprocessing
+        n_cpus = multiprocessing.cpu_count()
+        est_mins = (n_draws - 1) * t_one / n_cpus / 60
+        print(f'\n  Single draw: {t_one:.0f}s. {n_cpus} CPUs available.')
+        print(f'  Estimated wall time for remaining {n_draws - 1} draws (parallel): ~{est_mins:.0f} min')
+    else:
+        est_mins = (n_draws - 1) * t_one / 60
+        print(f'\n  Single draw: {t_one:.0f}s.')
+        print(f'  Estimated wall time for remaining {n_draws - 1} draws (serial): ~{est_mins:.0f} min')
+
+    all_rows = [row_0]
 
     def _run_one(i):
         # Cycle through posterior samples
@@ -211,12 +245,12 @@ def run_voi(n_draws=N_DRAWS, parallel=True):
         seed = 1000 + i  # Unique seed per draw for CRN
         return run_single_draw(i, epi_pars, draw, seed)
 
+    remaining = np.arange(1, n_draws)
+    print(f'\nRunning draws 1–{n_draws - 1}...')
     if parallel:
-        all_rows = sc.parallelize(_run_one, np.arange(n_draws))
+        all_rows += sc.parallelize(_run_one, remaining)
     else:
-        for i in range(n_draws):
-            if i % 10 == 0:
-                print(f'  Draw {i}/{n_draws}...')
+        for i in remaining:
             all_rows.append(_run_one(i))
 
     draws_df = pd.DataFrame(all_rows)
@@ -224,11 +258,21 @@ def run_voi(n_draws=N_DRAWS, parallel=True):
     # Compute EVPI
     evpi_df = compute_evpi(draws_df)
 
-    # Save
-    sc.saveobj(f'{RESULTS_DIR}/voi_draws.df', draws_df)
-    sc.saveobj(f'{RESULTS_DIR}/voi_evpi.df', evpi_df)
+    # Save with reproducibility metadata sidecar (see version_utils.py)
+    run_meta = dict(
+        n_draws=int(n_draws),
+        intv_scenario=INTV_SCENARIO,
+        soc_scenario=SOC_SCENARIO,
+        start=int(START),
+        stop=int(STOP),
+        intv_year=int(INTV_YEAR),
+        wtp_thresholds=WTP_THRESHOLDS,
+    )
+    save_with_meta(draws_df, f'{RESULTS_DIR}/voi_draws.df', run=run_meta)
+    save_with_meta(evpi_df,  f'{RESULTS_DIR}/voi_evpi.df',  run=run_meta)
     print(f'\nSaved {RESULTS_DIR}/voi_draws.df ({len(draws_df)} rows)')
     print(f'Saved {RESULTS_DIR}/voi_evpi.df')
+    print(f'Total time: {T.toc(output=True)/60:.1f} min')
 
     # Print summary
     print('\n--- EVPI Summary ---')

@@ -1,0 +1,27 @@
+{
+  "timestamp": "2026-04-21T12:58:58",
+  "python": "3.11.14",
+  "stisim": {
+    "version": "1.5.4",
+    "path": "/Users/robynstuart/gf/stisim/stisim",
+    "git": {
+      "sha": "7fd931f953ea",
+      "branch": "rc1.5.4",
+      "dirty": true
+    }
+  },
+  "starsim": {
+    "version": "3.3.2",
+    "path": "/Users/robynstuart/gf/starsim/starsim",
+    "git": {
+      "sha": "b67a7498da46",
+      "branch": "age-ranges",
+      "dirty": true
+    }
+  },
+  "anc_sti_repo": {
+    "sha": "e41c67320d18",
+    "branch": "upstream-fetal-health",
+    "dirty": true
+  }
+}
