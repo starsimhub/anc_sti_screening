@@ -1,4 +1,4 @@
-time,ng.prevalence,ct.prevalence_f_25_30,tv.prevalence,ng.new_infections,ct.new_infections,tv.new_infections
+time,ng_prevalence,ct_prevalence_f_25_30,tv_prevalence,ng_new_infections,ct_new_infections,tv_new_infections
 2000,0.020613667,0.12,0.117800798,303948.965,236837.1604,852516.6775
 2001,0.020670526,0.12,0.117616794,309130.761,240714.9333,857369.4991
 2002,0.020858151,0.12,0.118631654,314495.076,245864.8649,865533.4499
