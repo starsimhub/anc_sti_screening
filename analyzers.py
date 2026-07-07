@@ -366,3 +366,19 @@ def make_analyzers(extra_analyzers=None):
     if extra_analyzers is not None:
         analyzers += sc.tolist(extra_analyzers)
     return analyzers
+
+
+# TEMPORARY: stub classes for sti_notification analyzers used in the ported
+# model.py's make_diseases(). The real implementations live in
+# sti_notification/analyzers.py and will be ported in Task 3.1, which reverses
+# these stubs. Until then they are no-ops so make_sim() can init cleanly.
+class SyphTransmissionEvents(ss.Analyzer):
+    """TEMPORARY stub — reversed in Task 3.1."""
+    pass
+
+
+class CareTimingAnalyzer(ss.Analyzer):
+    """TEMPORARY stub — reversed in Task 3.1."""
+    def __init__(self, disease_names=None, treatment_disease_map=None,
+                 windows_months=None, **kwargs):
+        super().__init__(**kwargs)
