@@ -11,13 +11,9 @@ import sciris as sc
 import pandas as pd
 import stisim as sti
 
-# TEMPORARY: interventions module differs between repos; reversed in Task 3.1.
-# from interventions import make_testing, make_syph_testing, make_pn
+from interventions import make_testing, make_syph_testing, make_pn
 from hiv_model import make_hiv, make_hiv_intvs
 from connectors import sti_fetal
-# TEMPORARY: SyphTransmissionEvents, CareTimingAnalyzer are in sti_notification's
-# analyzers.py; stub implementations live at the bottom of anc_sti_screening's
-# analyzers.py until Task 3.1 ports the real classes and reverses these stubs.
 from analyzers import SyphTransmissionEvents, CareTimingAnalyzer
 
 LOCATION = 'zimbabwe'
@@ -219,15 +215,13 @@ def make_sim(seed=1, n_agents=5e3, start=1985, stop=2030,
 
     diseases, analyzers = make_diseases(which, care_seek_mult=care_seek_mult)
     networks = make_networks(dur_recall)
-    # TEMPORARY: intervention wiring restored in Task 3.1.
-    # interventions = make_interventions(diseases, which=which, poc=poc,
-    #                                    poc_syph=poc_syph,
-    #                                    pn_pars=pn_pars, stop=stop,
-    #                                    syph_symp_test_prob=syph_symp_test_prob,
-    #                                    syph_anc_probs=syph_anc_probs,
-    #                                    fsw_outreach=fsw_outreach,
-    #                                    fsw_coverage_per_step=fsw_coverage_per_step)
-    interventions = []
+    interventions = make_interventions(diseases, which=which, poc=poc,
+                                       poc_syph=poc_syph,
+                                       pn_pars=pn_pars, stop=stop,
+                                       syph_symp_test_prob=syph_symp_test_prob,
+                                       syph_anc_probs=syph_anc_probs,
+                                       fsw_outreach=fsw_outreach,
+                                       fsw_coverage_per_step=fsw_coverage_per_step)
 
     # FetalHealth tracks adverse birth outcomes (LBW, SGA, SVN, timing); the
     # sti_fetal connector translates STI infections + treatments into

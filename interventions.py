@@ -1,216 +1,772 @@
 """
 Interventions for the ANC STI screening model.
 
-Contains:
-    - SyndromicMgmt: syndromic management of VDS/UDS
-    - ANCScreen: GA-windowed ANC screening for asymptomatic STIs
-    - STIPartnerNotification: notify/treat partners of ANC-positive women
-    - make_testing: factory function to assemble all STI interventions
+Ported from sti_notification's interventions.py: make_testing, make_syph_testing,
+SyphilisANCTimer, FSWOutreach, CondomCounseling, CareSeekScaler, and module-level
+constants. PN classes (SyndromicPN, POCPN, PNIntensitySwitch) excluded; partner
+notification is out of scope for this project's first run. ANCScreen class preserved
+from the original anc_sti_screening interventions.py (needed for Task 3.5).
 """
 
-import numpy as np
-import sciris as sc
-import starsim as ss
 import stisim as sti
+import starsim as ss
+import numpy as np
+import pandas as pd
+import sciris as sc
 
 
-def count(arr):
-    return np.count_nonzero(arr)
+class SyphilisANCTimer(ss.Intervention):
+    """Schedule one ANC syph test event per pregnancy at a realistic week.
 
+    In Zimbabwe many pregnant women do not attend ANC in tri1 as WHO
+    recommends; visits are spread across weeks 8-32 of gestation. This
+    intervention draws a single visit-week for each newly-conceived
+    woman from Uniform(8, 32) and marks her as ANC-test-eligible on
+    that timestep. Downstream `SyphTest` interventions read from
+    ``today_uids`` to fire the actual test.
 
-# %% Syndromic management
-class SyndromicMgmt(sti.STITest):
+    States:
+        ti_anc_visit (FloatArr): timestep on which the woman will
+            attend her ANC visit. NaN if not pregnant / not scheduled.
+
+    Properties:
+        today_uids: UIDs whose ti_anc_visit == current ti and who are
+            still alive + still pregnant.
+
+    Pars:
+        visit_week_low  (int): lower bound of visit-week draw. Default 8.
+        visit_week_high (int): upper bound. Default 32.
     """
-    Syndromic management of vaginal/urethral discharge syndromes.
 
-    When a symptomatic patient presents, they are probabilistically assigned
-    one of four treatment outcomes based on whether they have cervical
-    infection (NG/CT) and their sex:
-        - all3: treated for NG + CT + TV/BV
-        - ngct: treated for NG + CT only
-        - mtnz: treated with metronidazole only (TV/BV)
-        - none: dismissed without treatment
-    """
-
-    def __init__(self, pars=None, treatments=None, diseases=None,
-                 outcome_treatment_map=None, treat_prob_data=None,
-                 years=None, start=None, stop=None, eligibility=None,
-                 name=None, label=None, **kwargs):
-        super().__init__(years=years, start=start, stop=stop, eligibility=eligibility, name=name, label=label)
+    def __init__(self, pars=None, name='syph_anc_timer', **kwargs):
+        super().__init__(name=name)
         self.define_pars(
-            tx_mix_cerv=dict(
-                all3=[0.50, 0.05],
-                ngct=[0.20, 0.80],
-                mtnz=[0.20, 0.00],
-                none=[0.10, 0.15],
-            ),
-            tx_mix_noncerv=dict(
-                all3=[0.40, 0.05],
-                ngct=[0.10, 0.80],
-                mtnz=[0.20, 0.00],
-                none=[0.30, 0.15],
-            ),
-            tx_cerv_f=ss.choice(a=4),
-            tx_cerv_m=ss.choice(a=4),
-            tx_noncerv_f=ss.choice(a=4),
-            tx_noncerv_m=ss.choice(a=4),
+            visit_week=ss.uniform(low=8, high=32),  # CRN-safe Dist
+        )
+        self.update_pars(pars=pars, **kwargs)
+        self.define_states(
+            ss.FloatArr('ti_anc_visit', default=np.nan,
+                        label='ti of scheduled ANC visit'),
+        )
+        return
+
+    def _schedule(self, uids):
+        """Draw a visit-week per woman and convert to a future ti."""
+        if len(uids) == 0:
+            return
+        preg = self.sim.demographics.pregnancy
+        # CRN-safe per-agent draw; ss.uniform().rvs keys on uids.
+        weeks = self.pars.visit_week.rvs(uids)
+        # Convert weeks → ti steps. preg.ti_pregnant[uids] is the
+        # conception ti; visit_ti = conception_ti + round(weeks / weeks_per_step).
+        # dt_year is the timestep duration in years; *52 → weeks per step.
+        weeks_per_step = self.t.dt_year * 52.0 if self.t.dt_year else 4.33
+        steps_to_visit = np.round(weeks / max(weeks_per_step, 1e-6)).astype(int)
+        self.ti_anc_visit[uids] = preg.ti_pregnant[uids] + steps_to_visit
+
+    def init_post(self):
+        super().init_post()
+        # Cover the cohort already pregnant at sim start so they don't
+        # miss out. Treat them like newly-conceived for scheduling.
+        if hasattr(self.sim.demographics, 'pregnancy'):
+            preg = self.sim.demographics.pregnancy
+            self._schedule(preg.pregnant.uids)
+
+    def step(self):
+        if not hasattr(self.sim.demographics, 'pregnancy'):
+            return
+        preg = self.sim.demographics.pregnancy
+        new_preg = preg.pregnant.uids[preg.ti_pregnant[preg.pregnant.uids] == self.ti]
+        self._schedule(new_preg)
+
+    @property
+    def today_uids(self):
+        if not hasattr(self.sim.demographics, 'pregnancy'):
+            return ss.uids()
+        preg = self.sim.demographics.pregnancy
+        candidates = self.ti_anc_visit.notnan.uids
+        if len(candidates) == 0:
+            return ss.uids()
+        due = candidates[self.ti_anc_visit[candidates] == self.ti]
+        if len(due) == 0:
+            return ss.uids()
+        # Still pregnant + still alive at this ti
+        return due[preg.pregnant[due] & self.sim.people.alive[due]]
+
+
+ANC_PROBS_REALISTIC = [0.20, 0.30, 0.40, 0.35, 0.55, 0.70, 0.85]
+ANC_PROBS_POC = [0.05, 0.10, 0.15, 0.15, 0.20, 0.20, 0.20]
+ANC_YEARS = [1980, 1990, 1999, 2008, 2012, 2018, 2040]
+
+
+def make_syph_testing(stop=2040, symp_test_prob=None, rdt_year=2012,
+                      anc_probs=None, anc_years=None,
+                      poc=False, intv_year=2027):
+    """
+    Symptomatic + ANC syphilis testing pathways.
+
+    Three channels feed into a single SyphTx:
+      1. Symptomatic test (GUD): agents with chancre or rash visible.
+      2. ANC RPR screen (1980-rdt_year): serology for pregnant women.
+      3. ANC dual RDT screen (rdt_year-stop): treponemal rapid test.
+
+    Args:
+        anc_probs: per-visit ANC testing probabilities at the calendar
+                   years in ``anc_years``. Default = ANC_PROBS_REALISTIC
+                   (peak 70% by 2018, 85% by 2040 — defensible Zimbabwe
+                   coverage matching reported EMTCT scale-up). For
+                   bifurcation analysis use ANC_PROBS_POC, the
+                   non-defensible proof-of-concept ramp from exps 22-23.
+    """
+    if symp_test_prob is None:
+        symp_test_prob = pd.read_csv('data/symp_test_prob_soc.csv')
+    if anc_probs is None:
+        anc_probs = ANC_PROBS_REALISTIC
+    if anc_years is None:
+        anc_years = ANC_YEARS
+
+    syph_dx_df = pd.read_csv(f'data/syph_dx.csv')
+    # Two-channel syndromic syph dx:
+    #   - Ulcer channel (chancre_visible | gudp.symptomatic) uses
+    #     syndromic_gud (universal 0.8): real-world syndromic
+    #     management of GUD presents is presumptive treatment of any
+    #     ulcer-presenter (true syph or HSV/chancroid), regardless of
+    #     stage. The gudp.symptomatic pool gives the false-positive
+    #     presumptive-treatment population AND the latent-syph
+    #     incidental-treatment pathway (latents who happen to have a
+    #     concurrent non-syph ulcer get treated for syph too).
+    #   - Rash channel (rash_visible) uses syndromic_rash (0.1
+    #     universal): secondary-syph rash presenters rarely make it
+    #     to STI-clinic syph treatment under real-world syndromic
+    #     flows. Modelled as a weak fallback.
+    gud_dx  = sti.SyphDx(syph_dx_df[syph_dx_df.name == 'syndromic_gud'],
+                         name='SyphDx_gud')
+    rash_dx = sti.SyphDx(syph_dx_df[syph_dx_df.name == 'syndromic_rash'],
+                         name='SyphDx_rash')
+    rpr_dx  = sti.SyphDx(syph_dx_df[syph_dx_df.name == 'rpr'],  name='SyphDx_rpr')
+    dual_dx = sti.SyphDx(syph_dx_df[syph_dx_df.name == 'dual'], name='SyphDx_dual')
+
+    def syph_dx_eligibility(sim):
+        """Treat anyone newly diagnosed positive by any treatment-triggering
+        syph test this step.
+
+        ANC pathway:
+          * Pre-intv_year (or non-POC arms): `syph_anc_rdt` positives go
+            straight to treatment. This matches calibration era practice
+            (no confirmatory step) and matches arm A throughout.
+          * POC arms after intv_year: `syph_anc_confirm` (rpr-product
+            confirm of dual RDT positives) replaces `syph_anc_rdt` in the
+            treatment-triggering list. The dual RDT becomes screen-only
+            so previously-cured women whose treponemal antibodies still
+            light up the dual RDT don't get re-treated.
+
+        Robust to optional tests: missing tests are skipped.
+        """
+        intv = sim.interventions
+        treat_tests = ['syph_symp_test', 'syph_symp_test_poc',
+                       'syph_rash_test', 'syph_anc_rpr',
+                       'syph_pn_test']
+        confirm = intv.get('syph_anc_confirm')
+        # Switch to confirm only once confirm has started (post intv_year);
+        # before that, anc_rdt remains the ANC treatment trigger even in
+        # POC arms — otherwise pre-2027 ANC syph treatment silently
+        # disappears in POC sims, breaking the calibration baseline.
+        if confirm is not None and sim.now >= confirm.start:
+            treat_tests.append('syph_anc_confirm')
+        else:
+            treat_tests.append('syph_anc_rdt')
+        tests = [intv.get(n) for n in treat_tests]
+        tests = [t for t in tests if t is not None]
+        if not tests:
+            return ss.uids()
+        pos = tests[0].ti_positive == tests[0].ti
+        for t in tests[1:]:
+            pos = pos | (t.ti_positive == t.ti)
+        return pos.uids
+
+    syph_tx = sti.SyphTx(name='syph_tx', label='syph_tx', eligibility=syph_dx_eligibility)
+
+    # --- Ulcer channel: chancre + non-syph GUD presenters ---
+    def syph_symp_eligibility(sim):
+        syph = sim.diseases.syph
+        gudp = sim.diseases.gudp
+        return syph.chancre_visible | gudp.symptomatic
+
+    # dt_scale=False: the CSV values are per-symptomatic-episode (visible
+    # chancres last ~1 month, the symptomatic window matches a single dt
+    # step). With dt_scale=True (stisim default) these would have been
+    # divided by 12 → effectively no symptomatic treatment of primary syph,
+    # which was a silent bug.
+    # rel_test scales the per-step test probability inside SyphTest
+    # (stisim base STITest line ~195: test_prob *= self.pars.rel_test,
+    # then clipped to [0, 1]). For care-seeking demand-gen we apply
+    # care_seek_mult as a MULTIPLIER on top of whatever rel_test ends
+    # up at — which matters because the calibration pipeline overrides
+    # syph_symp_test.rel_test via set_pars_local after construction.
+    # The applied scaling happens in build_sim (run.py) post-init, NOT
+    # here at construction time. ANC pathway is not scaled — ANC is
+    # opportunistic, not care-seeking-driven.
+    syph_symp_test = sti.SyphTest(
+        name='syph_symp_test', label='syph_symp_test',
+        product=gud_dx,
+        test_prob_data=symp_test_prob,
+        eligibility=syph_symp_eligibility,
+        dt_scale=False,
+    )
+
+    # --- POC ulcer channel (intervention scenarios) ---
+    # When poc=True:
+    #   * syph_symp_test_poc replaces syph_symp_test after intv_year for
+    #     symptomatic ulcer presenters, using the gud2 product (0.95
+    #     primary / 0.95 secondary / 0.05 elsewhere) — a definitive
+    #     etiological POC test for ulcer-presenting syph.
+    #   * syph_pn_test handles PN attendees, who are mostly asymptomatic
+    #     (notified because their index partner just got diagnosed) and
+    #     often in primary stage themselves (recently infected by the
+    #     index). It uses the rpr (non-treponemal) product, picked
+    #     deliberately over dual because (1) dual has only 0.20 sens for
+    #     primary syph — exactly the stage PN-attendees are most likely
+    #     in — whereas rpr is 0.90 across primary/secondary/latent/
+    #     tertiary; and (2) dual gives 0.95 false-positive on previously
+    #     cured patients (treponemal antibodies persist after cure) which
+    #     blew up unnecessary re-treatment under elevated PN, while rpr
+    #     turns negative after cure (sus_not_naive = 0.05). No
+    #     eligibility filter — fires only when called with explicit uids
+    #     from POCPN.notify_attendees.
+    syph_symp_test_poc = None
+    syph_pn_test = None
+    if poc:
+        gud2_dx = sti.SyphDx(syph_dx_df[syph_dx_df.name == 'gud2'],
+                              name='SyphDx_gud2')
+        rpr_pn_dx = sti.SyphDx(syph_dx_df[syph_dx_df.name == 'rpr'],
+                                name='SyphDx_rpr_pn')
+        syph_symp_test.stop = intv_year
+        syph_symp_test_poc = sti.SyphTest(
+            name='syph_symp_test_poc', label='syph_symp_test_poc',
+            product=gud2_dx,
+            test_prob_data=symp_test_prob,
+            eligibility=syph_symp_eligibility,
             dt_scale=False,
         )
-        self.update_pars(pars, **kwargs)
-        self.fvals_cerv    = [v[0] for v in self.pars.tx_mix_cerv.values()]
-        self.mvals_cerv    = [v[1] for v in self.pars.tx_mix_cerv.values()]
-        self.fvals_noncerv = [v[0] for v in self.pars.tx_mix_noncerv.values()]
-        self.mvals_noncerv = [v[1] for v in self.pars.tx_mix_noncerv.values()]
+        syph_symp_test_poc.start = intv_year
 
-        # Store treatments and diseases
-        self.treatments = sc.tolist(treatments)
-        self.diseases = diseases
-        if outcome_treatment_map is None:
-            outcome_treatment_map = dict(
-                all3=self.treatments,
-                ngct=[self.treatments[0], self.treatments[1]],
-                mtnz=[self.treatments[1]],
-                none=[],
-            )
-        self.outcome_treatment_map = outcome_treatment_map
+        def _never_eligible(_sim):
+            return ss.uids()
 
-        self.define_states(
-            ss.FloatArr('ti_referred'),
-            ss.FloatArr('ti_dismissed'),
+        syph_pn_test = sti.SyphTest(
+            name='syph_pn_test', label='syph_pn_test',
+            product=rpr_pn_dx,
+            test_prob_data=1.0,
+            eligibility=_never_eligible,
+            dt_scale=False,
         )
-        self.treat_prob_data = treat_prob_data
-        self.treat_prob = None
-        self.treated_by_uid = None
+        syph_pn_test.start = intv_year
 
+    # --- Rash channel: secondary syph rash presenters (weak) ---
+    def syph_rash_eligibility(sim):
+        return sim.diseases.syph.rash_visible
+
+    syph_rash_test = sti.SyphTest(
+        name='syph_rash_test', label='syph_rash_test',
+        product=rash_dx,
+        test_prob_data=symp_test_prob,
+        eligibility=syph_rash_eligibility,
+        dt_scale=False,
+    )
+
+    # --- ANC channels (era-gated) ---
+    # SyphilisANCTimer schedules a single ANC-visit timestep per pregnancy
+    # at a realistic gestational week. The SyphTest products read from its
+    # today_uids and (with dt_scale=False) the listed anc_probs values are
+    # the per-visit testing probability.
+    syph_anc_timer = SyphilisANCTimer()
+
+    def anc_eligibility(sim):
+        sched = sim.interventions.get('syph_anc_timer')
+        if sched is None:
+            return ss.uids()
+        return sched.today_uids
+
+    syph_anc_rpr = sti.SyphTest(
+        name='syph_anc_rpr', label='syph_anc_rpr',
+        product=rpr_dx,
+        years=anc_years,
+        test_prob_data=anc_probs,
+        eligibility=anc_eligibility,
+        dt_scale=False,
+    )
+    syph_anc_rpr.stop = rdt_year
+
+    syph_anc_rdt = sti.SyphTest(
+        name='syph_anc_rdt', label='syph_anc_rdt',
+        product=dual_dx,
+        years=anc_years,
+        test_prob_data=anc_probs,
+        eligibility=anc_eligibility,
+        dt_scale=False,
+    )
+    syph_anc_rdt.start = rdt_year
+
+    # ANC confirmatory POC test (POC arms only). The dual RDT used for
+    # ANC screening has 0.95 false-positive on previously-cured women
+    # (treponemal memory). Without confirmation, every previously-treated
+    # woman who returns for ANC gets re-treated. In POC arms we add a
+    # non-treponemal RPR confirmation step: only women whose dual RDT
+    # AND rpr both fire positive proceed to syph_tx. The 0.05 FP-on-cured
+    # of rpr cuts the over-treatment loop. Eligibility = women whose
+    # syph_anc_rdt set ti_positive this step.
+    syph_anc_confirm = None
+    if poc:
+        def anc_confirm_eligibility(sim):
+            rdt = sim.interventions.get('syph_anc_rdt')
+            if rdt is None:
+                return ss.uids()
+            return (rdt.ti_positive == rdt.ti).uids
+
+        # Reuse rpr_pn_dx if it was built above (poc=True branch); else
+        # build a new rpr product reference.
+        try:
+            anc_confirm_dx = rpr_pn_dx
+        except NameError:
+            anc_confirm_dx = sti.SyphDx(syph_dx_df[syph_dx_df.name == 'rpr'],
+                                        name='SyphDx_rpr_anc_confirm')
+        syph_anc_confirm = sti.SyphTest(
+            name='syph_anc_confirm', label='syph_anc_confirm',
+            product=anc_confirm_dx,
+            test_prob_data=1.0,
+            eligibility=anc_confirm_eligibility,
+            dt_scale=False,
+        )
+        syph_anc_confirm.start = intv_year
+
+    # syph_tx is listed last so its eligibility callback picks up
+    # ti_positive == ti from every treatment-triggering test that fired
+    # this step. Order matters: syph_anc_confirm runs AFTER syph_anc_rdt
+    # (its eligibility reads rdt.ti_positive == ti).
+    intvs = [syph_anc_timer, syph_symp_test, syph_rash_test,
+             syph_anc_rpr, syph_anc_rdt]
+    if syph_symp_test_poc is not None:
+        intvs.append(syph_symp_test_poc)
+    if syph_pn_test is not None:
+        intvs.append(syph_pn_test)
+    if syph_anc_confirm is not None:
+        intvs.append(syph_anc_confirm)
+    intvs.append(syph_tx)
+    return intvs
+
+
+def make_pn(poc=None, pn_pars=None):
+    """Placeholder: partner notification is out of scope for the first run.
+    Model.py imports and calls make_pn; this returns an inert intervention so
+    the intervention list stays wireable.
+    """
+    import starsim as ss
+    class _NoOp(ss.Intervention):
+        def step(self):
+            return
+    intv = _NoOp()
+    intv.name = 'pn_placeholder'
+    return intv
+
+
+class FSWOutreach(sti.SymptomaticTesting):
+    """Periodic NG/CT/TV testing of currently-active FSW.
+
+    Models the proactive sex-worker outreach programs (DREAMS, Sista2Sista,
+    SAPPHIRE clinics in Zimbabwe) that test FSW for STIs on a fixed
+    cadence regardless of symptoms. Reuses :class:`sti.SymptomaticTesting`
+    internals: per-step bernoulli over ``structuredsexual.fsw.uids``,
+    per-pathogen sens/spec, positives enqueued onto ng_tx / ct_tx /
+    metronidazole. Positives also drop into the PN index pool (via the
+    standard ``tx.ti_treated == ti`` semantics on the next treatment step).
+
+    The asymptomatic FSW reservoir is the structural bottleneck PN cannot
+    reach (a client picks up NG from a FSW, may be asymptomatic or
+    delayed-symptomatic, and even if he later seeks care he typically
+    cannot or will not name the FSW for PN). Direct outreach is the only
+    realistic way to break that chain.
+
+    Args:
+        coverage_per_step (float): per-step probability an active FSW
+            gets screened. 0.10 ≈ ~70% annual reach at monthly dt.
+        start (year): outreach begins. Default 2027 (intv_year).
+        stop (year): outreach ends. Default 2040.
+        diseases, treatments, disease_treatment_map: forwarded to
+            :class:`sti.SymptomaticTesting`.
+    """
+    def __init__(self, coverage_per_step=0.10, **kwargs):
+        # FSW outreach uses its own eligibility filter (active FSW only).
+        super().__init__(eligibility=self._fsw_eligibility, **kwargs)
+        # Per-agent bernoulli — converted via update_pars so it's CRN-safe
+        # and gets registered with the sim.
+        self.define_pars(
+            coverage=ss.bernoulli(p=coverage_per_step),
+        )
+
+    def _fsw_eligibility(self, sim):
+        """Currently-active FSW only, with per-step bernoulli."""
+        fsw = sim.networks.structuredsexual.fsw.uids
+        if len(fsw) == 0:
+            return ss.uids()
+        return self.pars.coverage.filter(fsw)
+
+
+SYNDROMIC_TX_MIX_CERV = dict(
+    all3=[0.50, 0.10],
+    ngct=[0.20, 0.80],
+    mtnz=[0.15, 0.00],
+    none=[0.15, 0.10],
+)
+SYNDROMIC_TX_MIX_NONCERV = dict(
+    all3=[0.40, 0.10],
+    ngct=[0.10, 0.80],
+    mtnz=[0.25, 0.00],
+    none=[0.25, 0.10],
+)
+# POC etiological-test accuracy used for the symptomatic-testing panel
+# and for FSW outreach. sti.SymptomaticTesting expects
+# {disease: [F, M]} dicts.
+POC_SENS = {'ng': [0.95, 0.95], 'ct': [0.95, 0.95], 'tv': [0.95, 0.95]}
+POC_SPEC = {'ng': [0.95, 0.95], 'ct': [0.95, 0.95], 'tv': [0.95, 0.95]}
+
+
+def make_testing(poc=None, stop=2040, fsw_outreach=False,
+                 fsw_coverage_per_step=0.10):
+
+    intv_year = 2027
+
+    # Don't shorten syndromic_vds.stop / syndromic_uds.stop in POC mode.
+    # sti.SyndromicManagement.step resets every linked treatment's
+    # eligibility to ss.uids() on every post-stop step — which would
+    # wipe whatever the POC panel sets on ng_tx/ct_tx/metronidazole,
+    # leaving no NG/CT/TV treatment in POC arms. Instead, gate the
+    # syndromic care-seekers' eligibility callable to return empty after
+    # intv_year so the step is a clean no-op.
+    synd_end = stop
+
+    # Symptomatic care-seekers, baseline (pre-POC) — used by both
+    # syndromic_vds/uds and the POC panel.
+    def _raw_seeking_care_vds(sim):
+        dis = sim.diseases
+        female = sim.people.female
+        ng_care = dis.ng.symptomatic & (dis.ng.ti_seeks_care == dis.ng.ti) & female
+        tv_care = dis.tv.symptomatic & (dis.tv.ti_seeks_care == dis.tv.ti) & female
+        ct_care = dis.ct.symptomatic & (dis.ct.ti_seeks_care == dis.ct.ti) & female
+        # Symptomatic BV also presents as vaginal discharge. This relies on
+        # SimpleBV (which has its own symptomatic + ti_seeks_care states);
+        # BV is female-only, so it enters VDS but not the UDS path.
+        bv_care = dis.bv.symptomatic & (dis.bv.ti_seeks_care == dis.bv.ti) & female
+        return (ng_care | ct_care | tv_care | bv_care).uids
+
+    def _raw_seeking_care_uds(sim):
+        dis = sim.diseases
+        male = sim.people.male
+        ng_care = dis.ng.symptomatic & (dis.ng.ti_seeks_care == dis.ng.ti) & male
+        tv_care = dis.tv.symptomatic & (dis.tv.ti_seeks_care == dis.tv.ti) & male
+        ct_care = dis.ct.symptomatic & (dis.ct.ti_seeks_care == dis.ct.ti) & male
+        return (ng_care | ct_care | tv_care).uids
+
+    if poc:
+        def seeking_care_vds(sim):
+            if sim.now >= intv_year:
+                return ss.uids()
+            return _raw_seeking_care_vds(sim)
+
+        def seeking_care_uds(sim):
+            if sim.now >= intv_year:
+                return ss.uids()
+            return _raw_seeking_care_uds(sim)
+
+        def seeking_care_any(sim):
+            return _raw_seeking_care_vds(sim) | _raw_seeking_care_uds(sim)
+    else:
+        seeking_care_vds = _raw_seeking_care_vds
+        seeking_care_uds = _raw_seeking_care_uds
+
+        def seeking_care_any(sim):
+            return seeking_care_vds(sim) | seeking_care_uds(sim)
+
+    ng_tx = sti.GonorrheaTreatment(name='ng_tx', label='ng_tx')
+    ct_tx = sti.STITreatment(diseases='ct', name='ct_tx', label='ct_tx')
+    metronidazole = sti.STITreatment(diseases=['tv', 'bv'], name='metronidazole', label='metronidazole')
+    treatments = [ng_tx, ct_tx, metronidazole]
+    outcome_tx_map = dict(
+        all3=treatments,
+        ngct=[ng_tx, ct_tx],
+        mtnz=[metronidazole],
+        none=[],
+    )
+
+    # Syndromic management of VDS and UDS. Use upstream
+    # sti.SyndromicManagement with our project-specific tx_mix values.
+    syndromic_pars = dict(
+        tx_mix_cerv=SYNDROMIC_TX_MIX_CERV,
+        tx_mix_noncerv=SYNDROMIC_TX_MIX_NONCERV,
+    )
+    syndromic_vds = sti.SyndromicManagement(
+        name='syndromic_vds',
+        label='syndromic_vds',
+        stop=synd_end,
+        diseases=['ng', 'ct', 'tv', 'bv'],
+        eligibility=seeking_care_vds,
+        treatments=treatments,
+        outcome_tx_map=outcome_tx_map,
+        pars=syndromic_pars,
+    )
+
+    syndromic_uds = sti.SyndromicManagement(
+        name='syndromic_uds',
+        label='syndromic_uds',
+        stop=synd_end,
+        diseases=['ng', 'ct', 'tv'],
+        eligibility=seeking_care_uds,
+        treatments=treatments,
+        outcome_tx_map=outcome_tx_map,
+        pars=syndromic_pars,
+    )
+
+    intvs = [syndromic_vds, syndromic_uds, ng_tx, ct_tx, metronidazole]
+    if poc:
+        # POC etiological panel: single eligibility filter for both sexes,
+        # high-sensitivity molecular test per pathogen, no presumptive
+        # metronidazole. Replaces syndromic_vds and syndromic_uds after
+        # intv_year. negative_treatments=[] disables the metro-for-VDS-
+        # negatives routing (p_mtnz defaults to 0 anyway, but the empty
+        # list also avoids the iteration over None in
+        # SymptomaticTesting.step).
+        disease_treatment_map = {'ng': ng_tx, 'ct': ct_tx, 'tv': metronidazole}
+        panel = sti.SymptomaticTesting(
+            name='panel', label='panel',
+            start=intv_year,
+            diseases=['ng', 'ct', 'tv'],
+            eligibility=seeking_care_any,
+            treatments=treatments,
+            disease_treatment_map=disease_treatment_map,
+            negative_treatments=[],
+            pars=dict(sens=POC_SENS, spec=POC_SPEC),
+        )
+        intvs.append(panel)
+
+    if fsw_outreach:
+        # Direct FSW outreach: per-step bernoulli over active FSW.
+        # Tests each sampled FSW for NG/CT/TV (same POC panel internals)
+        # and enqueues positives onto the same treatments. Requires
+        # poc=True semantically — the treatments must exist as-is.
+        if not poc:
+            raise ValueError("fsw_outreach=True requires poc=True (uses "
+                             "POC treatment routing).")
+        disease_treatment_map = {'ng': ng_tx, 'ct': ct_tx, 'tv': metronidazole}
+        fsw_intv = FSWOutreach(
+            coverage_per_step=fsw_coverage_per_step,
+            name='fsw_outreach', label='fsw_outreach',
+            start=intv_year, stop=stop,
+            diseases=['ng', 'ct', 'tv'],
+            treatments=treatments,
+            disease_treatment_map=disease_treatment_map,
+            negative_treatments=[],
+            pars=dict(sens=POC_SENS, spec=POC_SPEC),
+        )
+        intvs.append(fsw_intv)
+
+    # PN intervention is built separately by make_pn() and appended at
+    # the top level (make_interventions). That keeps the asymmetry
+    # explicit: make_testing builds NG/CT/TV testing + treatments,
+    # make_syph_testing builds syph testing + treatment, and make_pn
+    # builds the single PN intervention shared across all diseases.
+
+    return intvs
+
+
+class CondomCounseling(ss.Intervention):
+    """Condoms/counselling for the diagnosed (promoted from archived exp 06).
+
+    When an agent is treated for an STI, with probability ``coverage`` they are
+    enrolled in a protection window of ``dur``: during it their re-acquisition
+    susceptibility (``rel_sus``) for the protected diseases is multiplied by
+    ``(1 - eff)``. Acquisition only; onward transmission is left untouched.
+
+    The multiplier is applied multiplicatively each step, matching how the
+    disease risk factors and coinfection connectors (hiv_sti, bv) compose on
+    ``rel_sus``. Each disease's ``step_state`` resets ``rel_sus[:] = 1`` and
+    connectors re-apply their cofactors before interventions run, so
+    multiplying the currently-protected set here both composes with those
+    cofactors and self-expires when an agent leaves the protected set — no
+    reset bookkeeping needed beyond ``ti_protect_end``.
+
+    Default protected diseases are NG / CT / TV / syph. Syph is included
+    because PN-driven curative treatment without a protection window drives
+    re-infection churn (cured agent returns to fully-susceptible immediately),
+    which inflates incidence even as prevalence drops. Adding syph to the
+    protection window breaks that loop and lets BP blunt the PN-driven churn.
+    """
+
+    def __init__(self, coverage=0.5, eff=0.5, dur=ss.months(6),
+                 diseases=('ng', 'ct', 'tv', 'syph'),
+                 trigger_tx=('ng_tx', 'ct_tx', 'metronidazole', 'syph_tx'),
+                 start=2027, name='condom_counseling', *args, **kwargs):
+        super().__init__(name=name)
+        self.define_pars(
+            coverage=ss.bernoulli(p=coverage),
+            eff=eff,
+            dur=dur,
+        )
+        self.update_pars(*args, **kwargs)
+        self.diseases = list(diseases)
+        self.trigger_tx = list(trigger_tx)
+        self.start = start
+        self._window_steps = None
+        self.define_states(
+            ss.FloatArr('ti_protect_end', default=np.nan),
+        )
         return
 
     def init_pre(self, sim):
         super().init_pre(sim)
-        self.pars.tx_cerv_f.set(p=self.fvals_cerv)
-        self.pars.tx_cerv_m.set(p=self.mvals_cerv)
-        self.pars.tx_noncerv_f.set(p=self.fvals_noncerv)
-        self.pars.tx_noncerv_m.set(p=self.mvals_noncerv)
+        dt_year = sim.t.dt_year if sim.t.dt_year else 1 / 12
+        dur_years = self.pars.dur.years if hasattr(self.pars.dur, 'years') else float(self.pars.dur)
+        self._window_steps = max(1, int(round(dur_years / dt_year)))
+        return
+
+    def _newly_treated(self):
+        ti = self.ti
+        uids = ss.uids()
+        for name in self.trigger_tx:
+            tx = self.sim.interventions.get(name)
+            if tx is None or not hasattr(tx, 'ti_treated'):
+                continue
+            uids = uids | (tx.ti_treated == ti).uids
+        return uids
+
+    def step(self):
+        sim = self.sim
+        if sim.now < self.start:
+            return
+        ti = self.ti
+
+        treated = self._newly_treated()
+        if len(treated):
+            enroll = self.pars.coverage.filter(treated)
+            if len(enroll):
+                self.ti_protect_end[enroll] = ti + self._window_steps
+
+        protected = (self.ti_protect_end > ti).uids
+        if not len(protected):
+            return
+        # Multiply, don't overwrite: step_state has reset rel_sus[:]=1 and
+        # connectors have re-applied their cofactors this step, so this
+        # composes with them and self-expires when agents leave `protected`.
+        factor = 1.0 - float(self.pars.eff)
+        for d in self.diseases:
+            dis = sim.diseases.get(d)
+            if dis is None:
+                continue
+            dis.rel_sus[protected] *= factor
         return
 
     def init_results(self):
         super().init_results()
-        results = sc.autolist()
-        sexkeys = ['', 'f', 'm']
-        for sk in sexkeys:
-            skk = '' if sk == '' else f'_{sk}'
-            skl = '' if sk == '' else f' - {sk.upper()}'
-            results += [
-                ss.Result('new_care_seekers' + skk, dtype=int, label='Care seekers' + skl),
-                ss.Result('new_tx0' + skk, dtype=int, label='No treatment' + skl),
-                ss.Result('new_tx1' + skk, dtype=int, label='1 treatment' + skl),
-                ss.Result('new_tx2' + skk, dtype=int, label='2 treatments' + skl),
-                ss.Result('new_tx3' + skk, dtype=int, label='3 treatments' + skl),
-            ]
-        self.define_results(*results)
+        self.define_results(
+            ss.Result('n_protected', dtype=int, label='Currently protected',
+                      auto_plot=False),
+            ss.Result('new_enrolled', dtype=int, label='Newly enrolled',
+                      auto_plot=False),
+        )
         return
 
-    def step(self, uids=None):
-        sim = self.sim
-        ppl = sim.people
-        self.treated_by_uid = None
-
-        if sim.now >= self.stop:
-            for treatment in self.treatments:
-                treatment.eligibility = ss.uids()
-            return
-
-        if sim.now >= self.start:
-
-            if uids is None:
-                uids = self.check_eligibility()
-                self.ti_tested[uids] = self.ti
-
-            if len(uids):
-                f_uids = uids[ppl.female[uids]]
-                m_uids = uids[ppl.male[uids]]
-
-                # Determine who has symptomatic cervical infection
-                is_cerv = ppl.ng.symptomatic | ppl.ct.symptomatic
-
-                # Treatment outcomes by cervical status and sex
-                f_cerv_uids    = f_uids[is_cerv[f_uids]]
-                f_noncerv_uids = f_uids[~is_cerv[f_uids]]
-
-                ofc  = self.pars.tx_cerv_f.rvs(f_cerv_uids)
-                ofnc = self.pars.tx_noncerv_f.rvs(f_noncerv_uids)
-                om   = self.pars.tx_cerv_m.rvs(m_uids)
-
-                outcomes = dict(
-                    all3=f_cerv_uids[ofc == 0] | f_noncerv_uids[ofnc == 0] | m_uids[om == 0],
-                    ngct=f_cerv_uids[ofc == 1] | f_noncerv_uids[ofnc == 1] | m_uids[om == 1],
-                    mtnz=f_cerv_uids[ofc == 2] | f_noncerv_uids[ofnc == 2] | m_uids[om == 2],
-                    none=f_cerv_uids[ofc == 3] | f_noncerv_uids[ofnc == 3] | m_uids[om == 3],
-                )
-
-                # Track diagnostic accuracy per disease
-                for disease in self.diseases:
-                    for pkey, pattr in disease.sex_keys.items():
-                        skk = '' if pkey == '' else f'_{pkey}'
-                        disease.results[f'new_true_pos{skk}'][self.ti]  += len(outcomes['all3'] & disease.treatable & ppl[pattr])
-                        disease.results[f'new_false_pos{skk}'][self.ti] += len(outcomes['all3'] & disease.susceptible & ppl[pattr])
-                        disease.results[f'new_true_neg{skk}'][self.ti]  += len(outcomes['none'] & disease.susceptible & ppl[pattr])
-                        disease.results[f'new_false_neg{skk}'][self.ti] += len(outcomes['none'] & disease.treatable & ppl[pattr])
-
-                # Additional NG/CT-specific accuracy
-                for disease in [sim.diseases.ng, sim.diseases.ct]:
-                    for pkey, pattr in disease.sex_keys.items():
-                        skk = '' if pkey == '' else f'_{pkey}'
-                        disease.results[f'new_true_pos{skk}'][self.ti]  += len(outcomes['ngct'] & disease.treatable & ppl[pattr])
-                        disease.results[f'new_false_pos{skk}'][self.ti] += len(outcomes['ngct'] & disease.susceptible & ppl[pattr])
-                        disease.results[f'new_false_neg{skk}'][self.ti] += len(outcomes['mtnz'] & disease.treatable & ppl[pattr])
-                        disease.results[f'new_true_neg{skk}'][self.ti]  += len(outcomes['mtnz'] & disease.susceptible & ppl[pattr])
-
-                for disease in [sim.diseases.tv]:
-                    for pkey, pattr in disease.sex_keys.items():
-                        skk = '' if pkey == '' else f'_{pkey}'
-                        disease.results[f'new_true_pos{skk}'][self.ti]  += len(outcomes['mtnz'] & disease.treatable & ppl[pattr])
-                        disease.results[f'new_false_pos{skk}'][self.ti] += len(outcomes['mtnz'] & disease.susceptible & ppl[pattr])
-                        disease.results[f'new_false_neg{skk}'][self.ti] += len(outcomes['ngct'] & disease.treatable & ppl[pattr])
-                        disease.results[f'new_true_neg{skk}'][self.ti]  += len(outcomes['ngct'] & disease.susceptible & ppl[pattr])
-
-                # Update treatment eligibility
-                for outcome, txs in self.outcome_treatment_map.items():
-                    for tx in txs:
-                        tx.eligibility = tx.eligibility | outcomes[outcome]
-
-                # Track referral/dismissal
-                referred_uids  = outcomes['all3'] | outcomes['ngct'] | outcomes['mtnz']
-                dismissed_uids = outcomes['none']
-                self.ti_referred[referred_uids] = self.ti
-                self.ti_dismissed[dismissed_uids] = self.ti
-                self.treated_by_uid = outcomes
-
-            self.store_results()
-
-        return
-
-    def store_results(self):
-        """ Store results before treatments are applied, so infection status is accurate """
+    def update_results(self):
+        super().update_results()
         ti = self.ti
-        ppl = self.sim.people
-        just_tested = self.ti_tested == ti
-        self.results['new_care_seekers'][ti]   += count(just_tested)
-        self.results['new_care_seekers_f'][ti] += count(just_tested & ppl.female)
-        self.results['new_care_seekers_m'][ti] += count(just_tested & ppl.male)
-
-        sexdict = {'': 'alive', 'f': 'female', 'm': 'male'}
-        if self.treated_by_uid is not None:
-            for sk, sl in sexdict.items():
-                skk = '' if sk == '' else f'_{sk}'
-                self.results['new_tx0' + skk][ti] += count(ppl[sl][self.treated_by_uid['none']])
-                self.results['new_tx1' + skk][ti] += count(ppl[sl][self.treated_by_uid['mtnz']])
-                self.results['new_tx2' + skk][ti] += count(ppl[sl][self.treated_by_uid['ngct']])
-                self.results['new_tx3' + skk][ti] += count(ppl[sl][self.treated_by_uid['all3']])
-
+        self.results['n_protected'][ti] = int((self.ti_protect_end > ti).sum())
+        self.results['new_enrolled'][ti] = int((self.ti_protect_end == ti + self._window_steps).sum())
         return
 
 
-# %% ANC screening
+class CareSeekScaler(ss.Intervention):
+    """Defer the symptomatic care-seeking multiplier to intv_year.
+
+    Mirrors how POC / PN / BP activate at intv_year while pre-2027 behavior
+    matches the calibrated SOC baseline. Without this, scaling NG/CT/TV
+    `p_symp_care` or syph testing `rel_test` at sim construction rewrites
+    history all the way back to 1985 and pre-2027 trajectories diverge
+    across cells with different `care` settings.
+
+    On the first step at or after `start`:
+      * NG / CT / TV `pars.p_symp_care` is multiplied (sex-stratified, clipped
+        to 1.0).
+      * Each named syph testing intervention's `pars.rel_test` is multiplied
+        by the scalar form of the multiplier.
+
+    Note: `p_symp_care` is read at infection time (`set_care_seeking`), not
+    at care-seeking time. Agents already infected when this fires keep their
+    stamped `ti_seeks_care`; only new infections after `start` use the
+    scaled probability. A few-month transition period is expected.
+    """
+
+    def __init__(self, mult=1.0, start=2027,
+                 diseases=('ng', 'ct', 'tv'),
+                 syph_test_interventions=('syph_symp_test', 'syph_symp_test_poc',
+                                          'syph_rash_test'),
+                 name='care_seek_scaler', *args, **kwargs):
+        super().__init__(name=name)
+        self.update_pars(*args, **kwargs)
+        if hasattr(mult, '__len__'):
+            self.mult_f = float(mult[0])
+            self.mult_m = float(mult[1])
+        else:
+            self.mult_f = self.mult_m = float(mult)
+        self.start = start
+        self.diseases = list(diseases)
+        self.syph_test_interventions = list(syph_test_interventions)
+        self._fired = False
+        return
+
+    def _find_intv(self, name):
+        intvs = self.sim.interventions
+        if hasattr(intvs, 'get'):
+            found = intvs.get(name)
+            if found is not None:
+                return found
+        for cand in intvs:
+            if getattr(cand, 'name', None) == name:
+                return cand
+        return None
+
+    def _find_disease(self, name):
+        ds = self.sim.diseases
+        if hasattr(ds, 'get'):
+            found = ds.get(name)
+            if found is not None:
+                return found
+        for cand in ds:
+            if getattr(cand, 'name', None) == name:
+                return cand
+        return None
+
+    def step(self):
+        if self._fired or self.sim.now < self.start:
+            return
+        for d_name in self.diseases:
+            disease = self._find_disease(d_name)
+            if disease is None:
+                continue
+            curr = disease.pars.p_symp_care
+            disease.pars.p_symp_care = [min(1.0, float(curr[0]) * self.mult_f),
+                                        min(1.0, float(curr[1]) * self.mult_m)]
+        mult_scalar = (self.mult_f + self.mult_m) / 2.0
+        if mult_scalar != 1.0:
+            for intv_name in self.syph_test_interventions:
+                intv = self._find_intv(intv_name)
+                if intv is None or not hasattr(intv, 'pars'):
+                    continue
+                if hasattr(intv.pars, 'rel_test'):
+                    intv.pars.rel_test = intv.pars.rel_test * mult_scalar
+        self._fired = True
+        return
+
+
+# %% ANCScreen class (from original anc_sti_screening interventions.py)
+# Preserved for Task 3.5 (ANC screening scenarios).
+
 class ANCScreen(sti.STITest):
     """
     ANC-based screening for asymptomatic STIs during pregnancy.
@@ -384,232 +940,3 @@ class ANCScreen(sti.STITest):
         self.results['n_positive'][ti] = len(any_positive)
 
         return
-
-
-# %% Partner notification
-class STIPartnerNotification(ss.Intervention):
-    """
-    Notify and treat sexual partners of women testing positive at ANC.
-
-    When a woman tests positive for an STI at ANC screening, her current
-    sexual partner(s) are identified via the network and probabilistically
-    notified and treated. This reduces reinfection risk between screens.
-
-    Args:
-        p_partner_tx (float):   probability that a partner is successfully
-                                notified AND treated (default 0.3)
-        anc_screens (list):     names of ANCScreen interventions to monitor
-        treatments (list):      treatment modules to apply to partners
-        disease_treatment_map:  maps disease name → treatment module
-    """
-
-    def __init__(self, p_partner_tx=0.3, anc_screens=None,
-                 treatments=None, disease_treatment_map=None,
-                 name=None, label=None, start=None, **kwargs):
-        super().__init__(name=name, label=label, **kwargs)
-        self.define_pars(
-            p_notify_treat=ss.bernoulli(p=p_partner_tx),
-        )
-        self.anc_screen_names = anc_screens or ['anc_enroll', 'anc_tri3']
-        self.treatments = treatments or []
-        self.disease_treatment_map = disease_treatment_map or {}
-        self.start = start
-
-        self.define_states(
-            ss.FloatArr('ti_notified', label='Time partner was notified'),
-        )
-        return
-
-    def init_pre(self, sim):
-        super().init_pre(sim)
-        if self.start is None:
-            self.start = sim.t.yearvec[0]
-
-    def init_results(self):
-        super().init_results()
-        self.define_results(
-            ss.Result('n_index_cases',      dtype=int, label='Index cases (ANC positive)'),
-            ss.Result('n_partners_found',   dtype=int, label='Partners identified'),
-            ss.Result('n_partners_treated', dtype=int, label='Partners notified & treated'),
-        )
-
-    def step(self):
-        sim = self.sim
-        ti = self.ti
-
-        if sim.now < self.start:
-            return
-
-        # Find women who just tested positive at any ANC screen this timestep
-        index_uids = ss.uids()
-        for screen_name in self.anc_screen_names:
-            anc = sim.interventions.get(screen_name)
-            if anc is None:
-                continue
-            # Women screened this timestep who tested positive for any disease
-            just_screened = anc.ti_tested == ti
-            for disease in anc.diseases:
-                positive = just_screened & disease.infected
-                index_uids = index_uids | positive.uids
-
-        if len(index_uids) == 0:
-            return
-
-        self.results['n_index_cases'][ti] = len(index_uids)
-
-        # Find current sexual partners via network
-        nw = sim.networks.structuredsexual
-        partners = nw.find_contacts(index_uids, as_array=False)
-        partners = ss.uids(partners)
-
-        self.results['n_partners_found'][ti] = len(partners)
-
-        if len(partners) == 0:
-            return
-
-        # Probabilistically notify and treat
-        treated_partners = self.pars.p_notify_treat.filter(partners)
-        self.ti_notified[treated_partners] = ti
-        self.results['n_partners_treated'][ti] = len(treated_partners)
-
-        # Route to treatment — treat for all diseases the index was positive for
-        if len(treated_partners):
-            for dname, tx in self.disease_treatment_map.items():
-                # Treat partners who are infected (even if asymptomatic)
-                infected_partners = treated_partners[sim.diseases[dname].infected[treated_partners]]
-                if len(infected_partners):
-                    tx.eligibility = tx.eligibility | infected_partners
-
-        return
-
-
-# %% Factory functions
-def seeking_care_vds(sim):
-    """ Eligibility: women with symptomatic vaginal discharge seeking care """
-    dis = sim.diseases
-    female = sim.people.female
-    ng_care = dis.ng.symptomatic & (dis.ng.ti_seeks_care == dis.ng.ti) & female
-    tv_care = dis.tv.symptomatic & (dis.tv.ti_seeks_care == dis.tv.ti) & female
-    ct_care = dis.ct.symptomatic & (dis.ct.ti_seeks_care == dis.ct.ti) & female
-    bv_care = dis.bv.symptomatic & (dis.bv.ti_seeks_care == dis.bv.ti) & female
-    return (ng_care | ct_care | tv_care | bv_care).uids
-
-
-def seeking_care_uds(sim):
-    """ Eligibility: men with symptomatic urethral discharge seeking care """
-    dis = sim.diseases
-    male = sim.people.male
-    ng_care = dis.ng.symptomatic & (dis.ng.ti_seeks_care == dis.ng.ti) & male
-    tv_care = dis.tv.symptomatic & (dis.tv.ti_seeks_care == dis.tv.ti) & male
-    ct_care = dis.ct.symptomatic & (dis.ct.ti_seeks_care == dis.ct.ti) & male
-    return (ng_care | ct_care | tv_care).uids
-
-
-def make_testing(ng, ct, tv, bv, scenario='soc', stop=2040):
-    """
-    Create all STI testing and treatment interventions.
-
-    Args:
-        ng, ct, tv, bv: disease module instances
-        scenario (str):  screening scenario
-        stop (int):      simulation end year
-
-    Scenarios:
-        soc:        syndromic management only (standard of care)
-        enroll:     single enrollment screen (≤24w GA)
-        tri3:       single third-trimester screen (32-34w GA)
-        twice:      both screens (PROMISE trial design)
-        partner_tx: both screens + partner notification/treatment
-    """
-    # Treatments
-    ng_tx = sti.GonorrheaTreatment(
-        name='ng_tx',
-        rel_treat_unsucc=0.005,
-        rel_treat_unneed=0.0005,
-    )
-    ct_tx = sti.STITreatment(diseases='ct', name='ct_tx', label='ct_tx')
-    metronidazole = sti.STITreatment(diseases=['tv', 'bv'], name='metronidazole', label='metronidazole')
-    treatments = [ng_tx, ct_tx, metronidazole]
-
-    outcome_treatment_map = dict(
-        all3=treatments,
-        ngct=[ng_tx, ct_tx],
-        mtnz=[metronidazole],
-        none=[],
-    )
-
-    # Syndromic management of VDS
-    syndromic_vds = SyndromicMgmt(
-        name='syndromic_vds',
-        label='syndromic_vds',
-        stop=stop,
-        diseases=[ng, ct, tv, bv],
-        eligibility=seeking_care_vds,
-        treatments=treatments,
-        outcome_treatment_map=outcome_treatment_map,
-    )
-
-    # Syndromic management of UDS
-    syndromic_uds = SyndromicMgmt(
-        name='syndromic_uds',
-        label='syndromic_uds',
-        stop=stop,
-        diseases=[ng, ct, tv],
-        eligibility=seeking_care_uds,
-        treatments=treatments,
-        outcome_treatment_map=outcome_treatment_map,
-    )
-
-    intvs = [syndromic_vds, syndromic_uds, ng_tx, ct_tx, metronidazole]
-
-    # ANC screening scenarios — mapped to PROMISE trial design:
-    #   soc:         syndromic management only (standard of care)
-    #   enroll:      single enrollment screen (≤24w)
-    #   tri3:        single third-trimester screen (32-34w)
-    #   twice:       both enrollment + third-trimester screens (PROMISE design)
-    #   partner_tx:  twice + partner notification/treatment
-
-    disease_treatment_map = {'ng': ng_tx, 'ct': ct_tx, 'tv': metronidazole}
-    default_sensitivity  = {'ng': 0.95, 'ct': 0.95, 'tv': 0.90}
-    intv_year = 2027
-
-    def _make_anc_screen(name, ga_min=None, ga_max=None):
-        return ANCScreen(
-            name=name, label=name,
-            start=intv_year,
-            diseases=[ng, ct, tv],
-            treatments=treatments,
-            disease_treatment_map=disease_treatment_map,
-            screen_prob=0.5,
-            test_sensitivity=default_sensitivity,
-            ga_min=ga_min, ga_max=ga_max,
-        )
-
-    if scenario == 'enroll':
-        # Single enrollment screen: ≤24 weeks GA
-        intvs.append(_make_anc_screen('anc_enroll', ga_max=24))
-
-    elif scenario == 'tri3':
-        # Single third-trimester screen: ≥28 weeks GA (third trimester)
-        intvs.append(_make_anc_screen('anc_tri3', ga_min=28))
-
-    elif scenario in ['twice', 'partner_tx']:
-        # PROMISE design: enrollment (≤24w) + third-trimester (≥28w)
-        # Each instance has its own ti_tested, so women are screened once per visit
-        intvs.append(_make_anc_screen('anc_enroll', ga_max=24))
-        intvs.append(_make_anc_screen('anc_tri3', ga_min=28))
-
-        if scenario == 'partner_tx':
-            pn = STIPartnerNotification(
-                name='partner_notif', label='partner_notif',
-                p_partner_tx=0.3,
-                anc_screens=['anc_enroll', 'anc_tri3'],
-                treatments=treatments,
-                disease_treatment_map=disease_treatment_map,
-                start=intv_year,
-            )
-            intvs.append(pn)
-
-    # soc: no ANC screening (default — intvs unchanged)
-
-    return intvs
