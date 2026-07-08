@@ -75,10 +75,23 @@ COMPARE_METRICS = [
 
 def run_one(args):
     draw_idx, seed, row = args
+    # Mirror sti_notification's build_sim: pass syph_symp_test_prob and
+    # syph_anc_probs into make_sim so the syph testing / ANC RPR
+    # interventions actually fire. Without these args, syph runs untreated
+    # and prev diverges 4-5x from the calibrated truth.
+    symp_test = pd.read_csv(REPO / 'data' / 'symp_test_prob_concentrated.csv')
+    from interventions import ANC_PROBS_REALISTIC
     sim = make_sim(seed=seed, n_agents=N_AGENTS, start=1985, stop=STOP,
-                   which='all', fetal_health=False, verbose=-1)
+                   which='all', fetal_health=False, verbose=-1,
+                   syph_symp_test_prob=symp_test,
+                   syph_anc_probs=ANC_PROBS_REALISTIC)
     sim_pars = row_to_sim_pars(row)
     set_pars_local(sim, sim_pars)
+    # Enable FSW/client prev tracking on syph
+    for mod in sim.pars['diseases']:
+        if getattr(mod, 'name', None) == 'syph':
+            mod.store_sw = True
+            break
     sim.run()
     summary = extract_calibration_summary(sim, draw_idx, seed)
     # Keep only the fields we care about + identifiers

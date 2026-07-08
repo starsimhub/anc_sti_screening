@@ -14,6 +14,8 @@ import numpy as np
 import pandas as pd
 import sciris as sc
 
+from pn import PartnerNotification, pn_rates
+
 
 class SyphilisANCTimer(ss.Intervention):
     """Schedule one ANC syph test event per pregnancy at a realistic week.
@@ -355,18 +357,203 @@ def make_syph_testing(stop=2040, symp_test_prob=None, rdt_year=2012,
     return intvs
 
 
-def make_pn(poc=None, pn_pars=None):
-    """Placeholder: partner notification is out of scope for the first run.
-    Model.py imports and calls make_pn; this returns an inert intervention so
-    the intervention list stays wireable.
+class SyndromicPN(PartnerNotification):
     """
-    import starsim as ss
-    class _NoOp(ss.Intervention):
-        def step(self):
+    Partner notification adapted for syndromic STI treatment.
+
+    On attendance, routes partners by sex through the appropriate
+    syndromic-management intervention; partners are treated per the
+    syndromic algorithm on the next timestep.
+
+    Cycle prevention and the new_attended_no_sti / new_index_no_sti
+    diagnostic results are provided by the base
+    :class:`sti.PartnerNotification`; this subclass only overrides
+    ``notify_attendees`` to route attendees by sex.
+
+    Args:
+        eligibility: Index-case selector, e.g. just-treated agents.
+        syndromic_vds_name: name of the women's syndromic-mgmt intervention.
+        syndromic_uds_name: name of the men's syndromic-mgmt intervention.
+    """
+    def __init__(self, eligibility,
+                 syndromic_vds_name='syndromic_vds',
+                 syndromic_uds_name='syndromic_uds', **kwargs):
+        super().__init__(eligibility=eligibility, test=None, **kwargs)
+        self._syndromic_vds_name = syndromic_vds_name
+        self._syndromic_uds_name = syndromic_uds_name
+        return
+
+    def notify_attendees(self, uids):
+        ppl = self.sim.people
+        f_uids = uids[ppl.female[uids]]
+        m_uids = uids[ppl.male[uids]]
+        vds = self.sim.interventions.get(self._syndromic_vds_name)
+        uds = self.sim.interventions.get(self._syndromic_uds_name)
+        if len(f_uids) and vds is not None:
+            vds.step(uids=f_uids)
+        if len(m_uids) and uds is not None:
+            uds.step(uids=m_uids)
+        return
+
+
+
+class POCPN(PartnerNotification):
+    """
+    Partner notification for the POC arm, switching at ``intv_year``.
+
+    The POC arm must be identical to the SOC arm before ``intv_year``:
+    pre-switch, attendees are routed through syndromic management exactly
+    as :class:`SyndromicPN` does (by sex, to syndromic_vds/uds). Only at
+    ``intv_year`` does routing switch to the POC etiological cascade:
+      1. The POC NG/CT/TV panel (etiological dx, replaces syndromic_vds/uds).
+      2. The POC syph PN test (rpr, non-treponemal RDT; 0.90 sens across
+         primary/secondary/latent/tertiary, 0.05 FP on cured).
+
+    Without this time switch, pre-2027 PN attendees in the POC arm would be
+    routed to ``panel``/``syph_pn_test`` (both gated to ``start=intv_year``),
+    so they'd receive no treatment while the SOC arm treats the same
+    attendees via syndromic management — a deterministic pre-2027 divergence.
+
+    Looks up routed interventions by name through ``self.sim`` at step time.
+    Stashing refs at construction would bind to instances that the sim has
+    since cloned (their state arrays would be stale / unallocated).
+
+    Cycle prevention + diagnostic results come from the base
+    :class:`sti.PartnerNotification`.
+
+    Args:
+        eligibility: Index-case selector (same as SyndromicPN).
+        panel_name: name of the symptomatic-testing panel intervention to
+            route NG/CT/TV testing through (defaults to ``'panel'``).
+        syph_pn_test_name: name of the syph PN test (rpr product).
+        syndromic_vds_name: women's syndromic-mgmt intervention (pre-switch).
+        syndromic_uds_name: men's syndromic-mgmt intervention (pre-switch).
+        intv_year: year the POC routing switches on. Default 2027.
+    """
+    def __init__(self, eligibility, panel_name='panel',
+                 syph_pn_test_name='syph_pn_test',
+                 syndromic_vds_name='syndromic_vds',
+                 syndromic_uds_name='syndromic_uds',
+                 intv_year=2027, **kwargs):
+        super().__init__(eligibility=eligibility, test=None, **kwargs)
+        self._panel_name = panel_name
+        self._syph_pn_test_name = syph_pn_test_name
+        self._syndromic_vds_name = syndromic_vds_name
+        self._syndromic_uds_name = syndromic_uds_name
+        self._intv_year = intv_year
+
+    def notify_attendees(self, uids):
+        if not len(uids):
             return
-    intv = _NoOp()
-    intv.name = 'pn_placeholder'
-    return intv
+        # Pre-switch: route through syndromic management, identical to the
+        # SOC arm (SyndromicPN), so the POC arm matches SOC before intv_year.
+        if self.sim.now < self._intv_year:
+            ppl = self.sim.people
+            vds = self.sim.interventions.get(self._syndromic_vds_name)
+            uds = self.sim.interventions.get(self._syndromic_uds_name)
+            f_uids = uids[ppl.female[uids]]
+            m_uids = uids[ppl.male[uids]]
+            if len(f_uids) and vds is not None:
+                vds.step(uids=f_uids)
+            if len(m_uids) and uds is not None:
+                uds.step(uids=m_uids)
+            return
+        # Post-switch: POC etiological cascade.
+        panel = self.sim.interventions.get(self._panel_name)
+        if panel is not None:
+            panel.step(uids=uids)
+        syph_pn_test = self.sim.interventions.get(self._syph_pn_test_name)
+        if syph_pn_test is not None:
+            syph_pn_test.step(uids=uids)
+        return
+
+
+# Baseline PN rates: per-edge notification + per-(edge, partner-sex) attendance.
+# Stable = marital; casual partnerships have lower notify + attend rates.
+# Shared between make_testing's baseline_pn_eligibility callable and make_pn.
+BASELINE_NOTIFY = {'stable': 0.20, 'casual': 0.10}
+BASELINE_ATTEND = {'stable': {'f': 0.80, 'm': 0.50},
+                   'casual': {'f': 0.50, 'm': 0.25}}
+
+
+def baseline_pn_eligibility(sim):
+    """Index-case selector for the PN intervention: any agent whose
+    NG/CT/TV/syph treatment fired this step. Cycle prevention is handled
+    inside the upstream :class:`sti.PartnerNotification` (drops
+    ``(index, partner)`` edges where ``last_notifier[index] == partner``),
+    so no time-windowed filter is applied here.
+    """
+    intv = sim.interventions
+    masks = []
+    for name in ('ng_tx', 'ct_tx', 'metronidazole', 'syph_tx'):
+        tx = intv.get(name)
+        if tx is not None:
+            masks.append(tx.ti_treated == tx.ti)
+    if not masks:
+        return ss.uids()
+    combined = masks[0]
+    for m in masks[1:]:
+        combined = combined | m
+    return combined.uids
+
+
+def make_pn(poc=None, pn_pars=None):
+    """Build the shared partner-notification intervention.
+
+    PN is shared across all diseases — index pool draws from
+    NG/CT/TV/syph treatments collectively, and notify/attend rates are
+    set once (no per-disease stratification). Routing of attendees is
+    poc-aware:
+
+      * Non-POC (arm A): :class:`SyndromicPN` routes attendees through
+        syndromic_vds/uds, which apply the empiric NG/CT/TV/BV
+        treatment algorithm. Syph attendees fall out of the syndromic
+        pathway unless they happen to present with a chancre.
+      * POC (arms B/C/...): :class:`POCPN` routes attendees through the
+        POC etiological NG/CT/TV panel + `syph_pn_test` (rpr product),
+        applied unconditionally on attending uids. So a notified
+        attendee gets the full POC workup regardless of symptoms.
+
+    Cycle prevention and the new_attended_no_sti / new_index_no_sti
+    diagnostic results are provided by the upstream
+    :class:`sti.PartnerNotification`; we just pass ``diseases`` and
+    ``index_treatments`` so the upstream class can compute them.
+
+    Args:
+        poc: True for arms B/C/...; False for arm A.
+        pn_pars: optional dict of overrides. Recognized keys:
+            ``notify_rates`` (dict edge→prob), ``attendance_rates``
+            (dict edge→{f, m}→prob). Remaining keys forwarded to the
+            PN class.
+    """
+    overrides = (pn_pars or {}).copy()
+    notify = overrides.pop('notify_rates', BASELINE_NOTIFY)
+    attend = overrides.pop('attendance_rates', BASELINE_ATTEND)
+    pn_pars_built = dict(
+        p_notify_current=ss.bernoulli(p=pn_rates(notify)),
+        p_attends_current=ss.bernoulli(p=pn_rates(attend)),
+        p_notify_previous=ss.bernoulli(p=0),   # current channel only
+        p_attends_previous=ss.bernoulli(p=0),
+    )
+    if poc:
+        pn = POCPN(
+            eligibility=baseline_pn_eligibility,
+            panel_name='panel',
+            syph_pn_test_name='syph_pn_test',
+            name='pn', label='pn',
+            pars=pn_pars_built,
+            **overrides,
+        )
+    else:
+        pn = SyndromicPN(
+            eligibility=baseline_pn_eligibility,
+            syndromic_vds_name='syndromic_vds',
+            syndromic_uds_name='syndromic_uds',
+            name='pn', label='pn',
+            pars=pn_pars_built,
+            **overrides,
+        )
+    return pn
 
 
 class FSWOutreach(sti.SymptomaticTesting):
