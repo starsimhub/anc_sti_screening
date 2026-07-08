@@ -168,57 +168,52 @@ class birth_outcome_dalys(ss.Analyzer):
     def init_results(self):
         super().init_results()
         self.define_results(
-            ss.Result('n_deliveries',  dtype=int,   label='Deliveries'),
-            ss.Result('n_ptb',         dtype=int,   label='Preterm births'),
-            ss.Result('n_lbw',         dtype=int,   label='LBW births'),
-            ss.Result('n_ptb_lbw',     dtype=int,   label='PTB + LBW'),
-            ss.Result('yld_ptb',       scale=False, label='YLD — preterm birth'),
-            ss.Result('yld_lbw',       scale=False, label='YLD — LBW only'),
-            ss.Result('dalys',         scale=False, label='DALYs'),
-            ss.Result('cum_dalys',     scale=False, label='Cumulative DALYs'),
+            ss.Result('n_deliveries',   dtype=int,   label='Deliveries'),
+            ss.Result('n_ptb',          dtype=int,   label='Preterm births'),
+            ss.Result('n_lbw',          dtype=int,   label='LBW births'),
+            ss.Result('n_ptb_lbw',      dtype=int,   label='PTB + LBW'),
+            ss.Result('n_stillbirths',  dtype=int,   label='Stillbirths'),
+            ss.Result('yld_ptb',        scale=False, label='YLD — preterm birth'),
+            ss.Result('yld_lbw',        scale=False, label='YLD — LBW only'),
+            ss.Result('dalys',          scale=False, label='DALYs'),
+            ss.Result('cum_dalys',      scale=False, label='Cumulative DALYs'),
         )
 
     def step(self):
         sim = self.sim
         ti  = self.ti
-
         if sim.t.yearvec[ti] < self.start:
             return
 
-        try:
-            fh = sim.custom['fetal_health']
-        except (KeyError, AttributeError):
-            return
+        # Prefer the module's own per-timestep results (starsim Pregnancy tracks
+        # n_preterm / n_very_preterm / stillbirths natively; FetalHealth tracks
+        # n_lbw / n_vlbw / n_sga natively).
+        preg_res = sim.demographics.pregnancy.results if hasattr(sim.demographics, 'pregnancy') else None
+        fh_res   = sim.custom['fetal_health'].results if 'fetal_health' in sim.custom else None
 
-        preg = sim.people.pregnancy
-        # Pregnancy.step() clears pregnant before analyzers run; just-delivered women
-        # are identified by ti_delivery == ti and not pregnant
-        delivering = (preg.ti_delivery == ti) & ~preg.pregnant
-        if not delivering.any():
-            return
+        n_deliv = int(preg_res['births'].values[ti]) if preg_res and 'births' in preg_res else 0
+        n_ptb   = int(preg_res['n_preterm'].values[ti]) if preg_res and 'n_preterm' in preg_res else 0
+        n_lbw   = int(fh_res['n_lbw'].values[ti]) if fh_res and 'n_lbw' in fh_res else 0
+        n_still = int(preg_res['stillbirths'].values[ti]) if preg_res and 'stillbirths' in preg_res else 0
 
-        uids = delivering.uids
-        is_ptb = np.asarray(fh.is_preterm[uids], dtype=bool)
-        is_lbw = np.asarray(fh.is_lbw[uids], dtype=bool)
+        # PTB and LBW overlap is common; we can't easily count from module-level
+        # results alone. Approximate: assume all LBW are also PTB (mechanistic
+        # model produces this) — so n_ptb_lbw ~= n_lbw.
+        n_ptb_lbw = n_lbw
+        n_lbw_only = max(0, n_lbw - n_ptb_lbw)
 
-        n_ptb     = int(np.sum(is_ptb))
-        n_lbw     = int(np.sum(is_lbw))
-        n_ptb_lbw = int(np.sum(is_ptb & is_lbw))
-
-        # Avoid double-counting: LBW-only accrues dw_lbw; PTB accrues dw_ptb regardless
-        n_lbw_only = n_lbw - n_ptb_lbw
-
-        yld_ptb = n_ptb     * self.dw_ptb * self.dur_ptb
+        yld_ptb = n_ptb      * self.dw_ptb * self.dur_ptb
         yld_lbw = n_lbw_only * self.dw_lbw * self.dur_lbw
         dalys   = yld_ptb + yld_lbw
 
-        self.results['n_deliveries'][ti] = len(uids)
-        self.results['n_ptb'][ti]        = n_ptb
-        self.results['n_lbw'][ti]        = n_lbw
-        self.results['n_ptb_lbw'][ti]    = n_ptb_lbw
-        self.results['yld_ptb'][ti]      = yld_ptb
-        self.results['yld_lbw'][ti]      = yld_lbw
-        self.results['dalys'][ti]        = dalys
+        self.results['n_deliveries'][ti]  = n_deliv
+        self.results['n_ptb'][ti]         = n_ptb
+        self.results['n_lbw'][ti]         = n_lbw
+        self.results['n_ptb_lbw'][ti]     = n_ptb_lbw
+        self.results['n_stillbirths'][ti] = n_still
+        self.results['yld_ptb'][ti]       = yld_ptb
+        self.results['yld_lbw'][ti]       = yld_lbw
+        self.results['dalys'][ti]         = dalys
 
     def finalize(self):
         super().finalize()

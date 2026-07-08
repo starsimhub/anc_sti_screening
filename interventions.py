@@ -989,7 +989,7 @@ class ANCScreen(sti.STITest):
 
         self.diseases = sc.tolist(diseases)
         self.treatments = sc.tolist(treatments)
-        if disease_treatment_map is None and treatments is not None:
+        if disease_treatment_map is None:
             disease_treatment_map = {}
         self.disease_treatment_map = disease_treatment_map
 
