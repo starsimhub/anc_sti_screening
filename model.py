@@ -197,13 +197,21 @@ def make_interventions(diseases, which='all', poc=None, poc_syph=None,
     return intvs
 
 
-def make_sim(seed=1, n_agents=5e3, start=1985, stop=2030,
-             pn_pars=None, poc=None, poc_syph=None, which='all',
-             dur_recall=ss.years(0.25),
-             fetal_health=True, care_seek_mult=1.0, verbose=1/12,
-             syph_symp_test_prob=None, syph_anc_probs=None,
-             fsw_outreach=False, fsw_coverage_per_step=0.10):
-    """care_seek_mult scales NG/CT/TV symptomatic care-seeking
+def make_sim_parts(seed=1, n_agents=5e3, start=1985, stop=2030,
+                   pn_pars=None, poc=None, poc_syph=None, which='all',
+                   dur_recall=ss.years(0.25),
+                   fetal_health=True, care_seek_mult=1.0, verbose=1/12,
+                   syph_symp_test_prob=None, syph_anc_probs=None,
+                   fsw_outreach=False, fsw_coverage_per_step=0.10):
+    """Return a dict of Sim kwargs ready for sti.Sim(**parts).
+
+    Callers can inspect or mutate the returned dict before constructing
+    the Sim — useful for scenario interventions that need references to
+    the built disease/treatment modules (which are deep-copied by
+    sti.Sim on construction, invalidating any references captured
+    earlier).
+
+    care_seek_mult scales NG/CT/TV symptomatic care-seeking
     (`p_symp_care` on each disease module). Syph symptomatic
     care-seeking is scaled separately, at the experiment level — see
     build_sim in run.py: after set_pars_local applies any calibrated
@@ -212,7 +220,6 @@ def make_sim(seed=1, n_agents=5e3, start=1985, stop=2030,
     syph_symp_test_poc + syph_rash_test). Doing it here at construction
     would lose to set_pars_local overwriting it.
     """
-
     diseases, analyzers = make_diseases(which, care_seek_mult=care_seek_mult)
     networks = make_networks(dur_recall)
     interventions = make_interventions(diseases, which=which, poc=poc,
@@ -242,7 +249,7 @@ def make_sim(seed=1, n_agents=5e3, start=1985, stop=2030,
     )
     # Coinfection connectors auto-added by sti.Sim. GUDPlaceholder is named
     # 'gudp' so the buggy `gud_syph` auto-connector isn't matched.
-    sim = sti.Sim(
+    return dict(
         pars=simpars,
         datafolder=f'{DATA_DIR}/',
         demographics=LOCATION,
@@ -252,7 +259,24 @@ def make_sim(seed=1, n_agents=5e3, start=1985, stop=2030,
         analyzers=analyzers,
         custom=custom,
     )
-    return sim
+
+
+def make_sim(interventions=(), analyzers=(), custom=(), **parts_kwargs):
+    """Convenience wrapper: builds parts, appends extras, returns sti.Sim.
+
+    For scenarios that need references to the built disease/treatment
+    modules when constructing extras, call make_sim_parts directly and
+    mutate the returned dict before passing to sti.Sim.
+    """
+    parts = make_sim_parts(**parts_kwargs)
+    if interventions:
+        parts['interventions'] = list(parts['interventions']) + list(interventions)
+    if analyzers:
+        parts['analyzers'] = list(parts['analyzers']) + list(analyzers)
+    if custom:
+        base = parts.get('custom') or []
+        parts['custom'] = list(base) + list(custom)
+    return sti.Sim(**parts)
 
 
 if __name__ == '__main__':
