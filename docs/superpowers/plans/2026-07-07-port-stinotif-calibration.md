@@ -2044,6 +2044,36 @@ git commit -m "test: Phase-4 small-N end-to-end (1 draw × 1 seed × 52 cells)"
 
 ---
 
+## Phase 4.5 — ABO/APO artefact BEFORE the full run (added 2026-07-08)
+
+Rationale: small-N validation (Task 4.3, quick_validate path) showed the DALY delta between 1-screen 90% and 2-screen 90% is essentially flat (Δ ≈ -0.6 under `central_reversible`; -0.9 with DxRiskRedux bundled prevention). Before spending compute on the 700-sim grid, the user wants to see cumulative ABO/APO totals **disaggregated by disease-attributable fraction** as a standalone artefact. Hypothesis: syphilis (already covered by SOC RPR) drives most ABOs; adding NG/CT/TV screening has thin marginal value. If that's the story, we want it clear from the ABO panel before any DALY chart is drawn.
+
+### Task 4.5.1: Instrument `sti_fetal` (or a sibling analyzer) for per-disease ABO attribution
+
+**Approach A (in-sim):** In `connectors.py::sti_fetal._apply_infection`, record the pathogen that triggered each damage stamp per pregnancy on a per-pregnancy accumulator. At delivery, reconcile the resulting ABO status (PTB / LBW / stillbirth / NND) against the accumulated pathogen list — attribute the outcome to the pathogen(s) that stamped it. Options for cases with multiple pathogens: (a) primary-attribution by first-stamp; (b) weighted attribution by cumulative damage share; (c) count under every stamping disease and flag as multi-attributable in the report.
+
+**Approach B (counterfactual):** For each scenario, rerun with each disease's `beta_m2f` (and `beta_m2c` for syph) set to 0 in turn; diff the ABO counts. Cleaner semantics but 5x compute. Only use if in-sim attribution is prohibitively fiddly.
+
+Ship whichever approach the next agent judges tractable; document the choice.
+
+### Task 4.5.2: Standalone ABO/APO artefact
+
+**Files:**
+- New (or extend `aggregate_scenarios.py`): produce a table of cumulative PTB / LBW / stillbirth / NND across the 2028-2045 projection window, per (scenario × assumption × pathogen).
+- New figure: horizontal stacked bar per (scenario × assumption), stacks = per-pathogen attributable ABO counts. Panel per outcome (PTB / LBW / stillbirth / NND).
+
+Explicitly out of scope for this task: DALYs. `birth_outcome_dalys` continues to record them for internal use, but do not lead with the DALY chart until this artefact is signed off.
+
+### Task 4.5.3: Review checkpoint
+
+User reviews the ABO artefact and decides:
+- Proceed to full 700-sim run (Task 5.1) with current scenario set, or
+- Adjust the scenario set / effect-size assumptions in light of what the attribution reveals, then rerun the ABO artefact.
+
+Do NOT launch Task 5.1 without this review.
+
+---
+
 ## Phase 5 — Full first run
 
 ### Task 5.1: Run the full 1,300-sim grid
