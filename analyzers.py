@@ -132,20 +132,23 @@ class pregnancy_sti_stats(ss.Analyzer):
 
 class birth_outcome_dalys(ss.Analyzer):
     """
-    Compute DALYs from adverse birth outcomes (PTB and LBW) each timestep.
+    DALYs from adverse birth outcomes, reconciled per-birth at delivery.
 
-    Reads classification flags from the FetalHealth module at the point of
-    delivery and applies disability weights and durations. Parameters are
-    exposed so they can be varied across VoI draws.
+    Reads exact per-newborn PTB/LBW flags in a Pregnancy delivery callback,
+    which lets us count PTB-only, LBW-only, and PTB+LBW separately without
+    approximation. Syph stillbirths come from `syph.cs_outcome == 2`
+    (module's own new_stillborns counter is broken by a step()-clears-before-
+    update_results timing bug — see reference_stisim_syph_ti_stillborn_timing_bug).
 
-    YLD = n_ptb * dw_ptb * dur_ptb  +  n_lbw_only * dw_lbw * dur_lbw
-
-    PTB+LBW co-occurrences accrue the higher disability weight (PTB) only,
-    to avoid double-counting.
+    YLD accounting:
+      n_ptb  = n_ptb_only + n_ptb_and_lbw
+      n_lbw  = n_lbw_only + n_ptb_and_lbw
+      yld_ptb = n_ptb * dw_ptb * dur_ptb        # co-occurring PTB+LBW takes PTB weight
+      yld_lbw = n_lbw_only * dw_lbw * dur_lbw   # term-SGA-LBW only
 
     Args:
-        dw_ptb  (float): disability weight for preterm birth (default GBD 2019: 0.15)
-        dw_lbw  (float): disability weight for LBW without PTB (default GBD 2019: 0.10)
+        dw_ptb  (float): disability weight for preterm birth (GBD 2019: 0.15)
+        dw_lbw  (float): disability weight for LBW without PTB (GBD 2019: 0.10)
         dur_ptb (float): DALY accrual duration in years for PTB (default: 1.0)
         dur_lbw (float): DALY accrual duration in years for LBW (default: 1.0)
         start   (float): year from which to start accumulating DALYs
@@ -164,6 +167,13 @@ class birth_outcome_dalys(ss.Analyzer):
         super().init_pre(sim)
         if self.start is None:
             self.start = sim.t.yearvec[0]
+        self._pregnancy = sim.demographics.pregnancy
+        self._fh = sim.custom['fetal_health']
+        self._syph = sim.diseases.get('syph')
+        self._pregnancy.add_delivery_callback(self._on_delivery)
+
+    def step(self):
+        return
 
     def init_results(self):
         super().init_results()
@@ -171,49 +181,50 @@ class birth_outcome_dalys(ss.Analyzer):
             ss.Result('n_deliveries',   dtype=int,   label='Deliveries'),
             ss.Result('n_ptb',          dtype=int,   label='Preterm births'),
             ss.Result('n_lbw',          dtype=int,   label='LBW births'),
-            ss.Result('n_ptb_lbw',      dtype=int,   label='PTB + LBW'),
-            ss.Result('n_stillbirths',  dtype=int,   label='Stillbirths'),
-            ss.Result('yld_ptb',        scale=False, label='YLD — preterm birth'),
-            ss.Result('yld_lbw',        scale=False, label='YLD — LBW only'),
-            ss.Result('dalys',          scale=False, label='DALYs'),
-            ss.Result('cum_dalys',      scale=False, label='Cumulative DALYs'),
+            ss.Result('n_ptb_only',     dtype=int,   label='PTB without LBW'),
+            ss.Result('n_lbw_only',     dtype=int,   label='LBW without PTB (term SGA)'),
+            ss.Result('n_ptb_and_lbw',  dtype=int,   label='PTB and LBW'),
+            ss.Result('n_stillbirths',  dtype=int,   label='Stillbirths (syph)'),
+            ss.Result('yld_ptb',        label='YLD — preterm birth'),
+            ss.Result('yld_lbw',        label='YLD — LBW only'),
+            ss.Result('dalys',          label='DALYs'),
+            ss.Result('cum_dalys',      label='Cumulative DALYs'),
         )
 
-    def step(self):
-        sim = self.sim
-        ti  = self.ti
-        if sim.t.yearvec[ti] < self.start:
+    def _on_delivery(self, mother_uids, newborn_uids):
+        if self.sim.t.yearvec[self.ti] < self.start:
             return
+        if not len(newborn_uids):
+            return
+        ti = self.ti
 
-        # Prefer the module's own per-timestep results (starsim Pregnancy tracks
-        # n_preterm / n_very_preterm / stillbirths natively; FetalHealth tracks
-        # n_lbw / n_vlbw / n_sga natively).
-        preg_res = sim.demographics.pregnancy.results if hasattr(sim.demographics, 'pregnancy') else None
-        fh_res   = sim.custom['fetal_health'].results if 'fetal_health' in sim.custom else None
+        is_ptb = self._pregnancy.preterm[newborn_uids]
+        is_lbw = self._fh.lbw[newborn_uids]
+        ptb_only    = is_ptb & ~is_lbw
+        lbw_only    = is_lbw & ~is_ptb
+        ptb_and_lbw = is_ptb & is_lbw
 
-        n_deliv = int(preg_res['births'].values[ti]) if preg_res and 'births' in preg_res else 0
-        n_ptb   = int(preg_res['n_preterm'].values[ti]) if preg_res and 'n_preterm' in preg_res else 0
-        n_lbw   = int(fh_res['n_lbw'].values[ti]) if fh_res and 'n_lbw' in fh_res else 0
-        n_still = int(preg_res['stillbirths'].values[ti]) if preg_res and 'stillbirths' in preg_res else 0
+        n_ptb_only    = int(ptb_only.sum())
+        n_lbw_only    = int(lbw_only.sum())
+        n_ptb_and_lbw = int(ptb_and_lbw.sum())
+        n_ptb = n_ptb_only + n_ptb_and_lbw
+        n_lbw = n_lbw_only + n_ptb_and_lbw
 
-        # PTB and LBW overlap is common; we can't easily count from module-level
-        # results alone. Approximate: assume all LBW are also PTB (mechanistic
-        # model produces this) — so n_ptb_lbw ~= n_lbw.
-        n_ptb_lbw = n_lbw
-        n_lbw_only = max(0, n_lbw - n_ptb_lbw)
+        n_still = int((self._syph.cs_outcome[newborn_uids] == 2).sum()) if self._syph is not None else 0
 
         yld_ptb = n_ptb      * self.dw_ptb * self.dur_ptb
         yld_lbw = n_lbw_only * self.dw_lbw * self.dur_lbw
-        dalys   = yld_ptb + yld_lbw
 
-        self.results['n_deliveries'][ti]  = n_deliv
-        self.results['n_ptb'][ti]         = n_ptb
-        self.results['n_lbw'][ti]         = n_lbw
-        self.results['n_ptb_lbw'][ti]     = n_ptb_lbw
-        self.results['n_stillbirths'][ti] = n_still
-        self.results['yld_ptb'][ti]       = yld_ptb
-        self.results['yld_lbw'][ti]       = yld_lbw
-        self.results['dalys'][ti]         = dalys
+        self.results['n_deliveries'][ti]  += len(newborn_uids)
+        self.results['n_ptb'][ti]         += n_ptb
+        self.results['n_lbw'][ti]         += n_lbw
+        self.results['n_ptb_only'][ti]    += n_ptb_only
+        self.results['n_lbw_only'][ti]    += n_lbw_only
+        self.results['n_ptb_and_lbw'][ti] += n_ptb_and_lbw
+        self.results['n_stillbirths'][ti] += n_still
+        self.results['yld_ptb'][ti]       += yld_ptb
+        self.results['yld_lbw'][ti]       += yld_lbw
+        self.results['dalys'][ti]         += yld_ptb + yld_lbw
 
     def finalize(self):
         super().finalize()
