@@ -69,6 +69,11 @@ class sti_fetal(ss.Connector):
         )
         self.update_pars(pars, **kwargs)
 
+        self.define_states(*[
+            ss.BoolArr(f'exposed_{d}', label=f'Pregnancy exposed to {d.upper()}')
+            for d in self.disease_names
+        ])
+
         return
 
     def init_pre(self, sim):
@@ -89,6 +94,10 @@ class sti_fetal(ss.Connector):
     def _on_conception(self, uids):
         """Check for pre-existing infections at the start of pregnancy."""
         for dname in self.disease_names:
+            arr = getattr(self, f'exposed_{dname}', None)
+            if arr is not None:
+                arr[uids] = False
+        for dname in self.disease_names:
             try:
                 disease = self.sim.diseases[dname]
                 infected_uids = uids[disease.infected[uids]]
@@ -100,6 +109,10 @@ class sti_fetal(ss.Connector):
 
     def _apply_infection(self, uids, disease_name):
         """Apply infection effects on fetal health (timing shift + growth restriction)."""
+        arr = getattr(self, f'exposed_{disease_name}', None)
+        if arr is not None:
+            arr[uids] = True
+
         fh = self._get_fh()
         if fh is None:
             return
