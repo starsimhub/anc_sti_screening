@@ -74,9 +74,9 @@ EFFECT_SIZE_ASSUMPTIONS['central_reversible'] = dict(
 )
 
 EFFECT_SIZE_ASSUMPTIONS['weak_effects'] = dict(
-    label='Weak effects (lower CIs)',
-    ptb_shift_mean=sc.objdict(ng=1.4, ct=1.0, tv=0.7, syph=2.5),
-    growth_penalty=sc.objdict(ng=0.04, ct=0.01, tv=0.02, syph=0.06),
+    label='Weak effects (near-null STI harm)',
+    ptb_shift_mean=sc.objdict(ng=0.5, ct=0.3, tv=0.2, syph=1.0),
+    growth_penalty=sc.objdict(ng=0.02, ct=0.005, tv=0.01, syph=0.03),
     tx_residual_growth=sc.objdict(tri1=0.25, tri2=0.40, tri3=0.60),
     tx_residual_timing=sc.objdict(tri1=0.35, tri2=0.55, tri3=0.75),
 )

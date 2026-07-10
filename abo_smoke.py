@@ -25,7 +25,7 @@ N_AGENTS = 10_000
 SCENARIOS = ['soc', 'anc_1screen_90cov', 'anc_2screen_90cov']
 ASSUMPTIONS = list(EFFECT_SIZE_ASSUMPTIONS.keys())  # 4 regimes
 DISEASES = ('ng', 'ct', 'tv', 'syph')
-K_SEEDS = 1  # bump to 5 for the deliverable
+K_SEEDS = 5  # deliverable target
 
 
 def _cum(res, key, mask):
