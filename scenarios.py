@@ -162,9 +162,11 @@ def build_scenario_sim(seed, scenario_id, assumption_id, draw_row,
 def _build_anc_screens(cell):
     """Build ANCScreen instances for a scenario cell using name strings.
 
-    n_screens == 0: SOC, return [].
-    n_screens == 1: enrolment screen only (ga <= 24w).
-    n_screens == 2: enrolment (ga <= 24w) + 3rd trimester (ga 32-34w).
+    n_screens: 0=SOC (returns []), 1=enrolment (0-24w), 2=enrolment + 3rd tri (30-36w).
+
+    3rd-tri window is 30-36w rather than PROMISE-design 32-34w: the monthly
+    timestep advances GA by ~4.3 weeks so no woman's GA sequence lands inside
+    a 2-week window. Widen to 6 weeks to catch at least one timestep.
     """
     from interventions import ANCScreen
     n_screens = cell['n_screens']
@@ -186,5 +188,5 @@ def _build_anc_screens(cell):
     )
     screens = [ANCScreen(ga_min=0, ga_max=24, name='anc_enroll', label='anc_enroll', **common)]
     if n_screens == 2:
-        screens.append(ANCScreen(ga_min=32, ga_max=34, name='anc_tri3', label='anc_tri3', **common))
+        screens.append(ANCScreen(ga_min=30, ga_max=36, name='anc_tri3', label='anc_tri3', **common))
     return screens
