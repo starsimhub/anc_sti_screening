@@ -32,15 +32,22 @@ INTERVENTION_SCENARIOS = sc.objdict()
 INTERVENTION_SCENARIOS['soc'] = dict(
     label='SOC (syndromic + syph RPR only)',
     n_screens=0, coverage=0.0,
+    syph_anc_windows=[(8, 32)],
 )
 
 for cov in (0.50, 0.75, 0.90):
     cid = f'anc_1screen_{int(cov*100)}cov'
-    INTERVENTION_SCENARIOS[cid] = dict(label=cid, n_screens=1, coverage=cov)
+    INTERVENTION_SCENARIOS[cid] = dict(
+        label=cid, n_screens=1, coverage=cov,
+        syph_anc_windows=[(0, 24)],
+    )
 
 for cov in (0.50, 0.75, 0.90):
     cid = f'anc_2screen_{int(cov*100)}cov'
-    INTERVENTION_SCENARIOS[cid] = dict(label=cid, n_screens=2, coverage=cov)
+    INTERVENTION_SCENARIOS[cid] = dict(
+        label=cid, n_screens=2, coverage=cov,
+        syph_anc_windows=[(0, 24), (30, 36)],
+    )
 
 assert len(INTERVENTION_SCENARIOS) == 7
 
@@ -126,6 +133,7 @@ def build_scenario_sim(seed, scenario_id, assumption_id, draw_row,
         which='all', fetal_health=True, verbose=-1,
         syph_symp_test_prob=symp_test,
         syph_anc_probs=ANC_PROBS_REALISTIC,
+        syph_anc_windows=cell.get('syph_anc_windows'),
     )
 
     # ANC screens carry disease/treatment names (strings); ANCScreen resolves them

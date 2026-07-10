@@ -135,11 +135,14 @@ def make_networks(dur_recall=ss.years(0.25)):
 
 def make_interventions(diseases, which='all', poc=None, poc_syph=None,
                        pn_pars=None, stop=2040,
-                       syph_symp_test_prob=None, syph_anc_probs=None):
+                       syph_symp_test_prob=None, syph_anc_probs=None,
+                       syph_anc_windows=None):
     """Build intervention list: HIV → NG/CT/TV testing+treatment → PN → syph testing+treatment.
 
     poc_syph falls back to poc if None. poc controls NG/CT/TV SymptomaticTesting;
     poc_syph controls the syph ulcer-channel product swap independently.
+    syph_anc_windows is a list of (low_wk, high_wk) tuples passed to
+    SyphilisANCTimer; defaults to [(8, 32)] (SOC arbitrary timing).
     """
     if poc_syph is None:
         poc_syph = poc
@@ -152,7 +155,8 @@ def make_interventions(diseases, which='all', poc=None, poc_syph=None,
         intvs.append(make_pn(poc=poc, pn_pars=pn_pars))
     if which in ('ulcerative', 'all'):
         intvs += make_syph_testing(stop=stop, symp_test_prob=syph_symp_test_prob,
-                                   anc_probs=syph_anc_probs, poc=bool(poc_syph))
+                                   anc_probs=syph_anc_probs, poc=bool(poc_syph),
+                                   syph_anc_windows=syph_anc_windows)
     return intvs
 
 
@@ -160,7 +164,8 @@ def make_sim_parts(seed=1, n_agents=5e3, start=1985, stop=2030,
                    pn_pars=None, poc=None, poc_syph=None, which='all',
                    dur_recall=ss.years(0.25),
                    fetal_health=True, care_seek_mult=1.0, verbose=1/12,
-                   syph_symp_test_prob=None, syph_anc_probs=None):
+                   syph_symp_test_prob=None, syph_anc_probs=None,
+                   syph_anc_windows=None):
     """Return a dict of Sim kwargs ready for sti.Sim(**parts).
 
     Callers can inspect or mutate the returned dict before constructing
@@ -173,7 +178,8 @@ def make_sim_parts(seed=1, n_agents=5e3, start=1985, stop=2030,
                                        poc_syph=poc_syph,
                                        pn_pars=pn_pars, stop=stop,
                                        syph_symp_test_prob=syph_symp_test_prob,
-                                       syph_anc_probs=syph_anc_probs)
+                                       syph_anc_probs=syph_anc_probs,
+                                       syph_anc_windows=syph_anc_windows)
 
     # sti_fetal translates STI events into FetalHealth API calls.
     custom = [ss.FetalHealth(), sti_fetal()] if fetal_health else None

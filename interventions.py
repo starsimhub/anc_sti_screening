@@ -19,44 +19,40 @@ from pn import PartnerNotification, pn_rates
 
 
 class SyphilisANCTimer(ss.Intervention):
-    """Schedule one ANC syph test event per pregnancy at a realistic week.
+    """Schedule ANC syph test events per pregnancy.
 
-    This intervention draws a single visit-week for each newly-conceived
-    woman from Uniform(8, 32) and marks her as ANC-test-eligible on
-    that timestep. The `SyphTest` intervention reads from ``today_uids``
-    to perform the actual test.
+    Accepts a list of gestational-age windows (in weeks). One visit is
+    scheduled per pregnancy per window. `today_uids` returns UIDs where
+    any scheduled visit fires this timestep.
 
-    States:
-        ti_anc_visit (FloatArr): timestep on which the woman will
-            attend her ANC visit. NaN if not pregnant / not scheduled.
-
-    Properties:
-        today_uids: UIDs whose ti_anc_visit == current ti and who are
-            still alive + still pregnant.
-
-    Pars:
-        visit_week_low  (int): lower bound of visit-week draw. Default 8.
-        visit_week_high (int): upper bound. Default 32.
+    Default windows=[(8, 32)] preserves the SOC arbitrary-timing behavior.
+    Panel-aligned scenarios pass windows matching the ANCScreen windows
+    (e.g. [(0, 24)] for 1-screen or [(0, 24), (30, 36)] for 2-screen).
     """
 
-    def __init__(self, pars=None, name='syph_anc_timer', **kwargs):
+    def __init__(self, pars=None, windows=None, name='syph_anc_timer', **kwargs):
         super().__init__(name=name)
-        self.define_pars(
-            visit_week=ss.uniform(low=ss.weeks(8), high=ss.weeks(32)),  
-        )
+        self.windows = list(windows) if windows else [(8, 32)]
+        self.define_pars(**{
+            f'visit_week_{k}': ss.uniform(low=ss.weeks(low), high=ss.weeks(high))
+            for k, (low, high) in enumerate(self.windows)
+        })
         self.update_pars(pars=pars, **kwargs)
-        self.define_states(
-            ss.FloatArr('ti_anc_visit', label='ti of scheduled ANC visit'),
-        )
+        self.define_states(*[
+            ss.FloatArr(f'ti_visit_{k}', label=f'ti of scheduled ANC visit slot {k}')
+            for k in range(len(self.windows))
+        ])
         return
 
     def _schedule(self, uids):
-        """Draw a visit-week per woman."""
         if len(uids) == 0:
             return
         preg = self.sim.demographics.pregnancy
-        weeks = self.pars.visit_week.rvs(uids)
-        self.ti_anc_visit[uids] = preg.ti_pregnant[uids] + weeks
+        for k in range(len(self.windows)):
+            dist = getattr(self.pars, f'visit_week_{k}')
+            weeks = dist.rvs(uids)
+            arr = getattr(self, f'ti_visit_{k}')
+            arr[uids] = preg.ti_pregnant[uids] + weeks
 
     def init_post(self):
         super().init_post()
@@ -76,14 +72,17 @@ class SyphilisANCTimer(ss.Intervention):
         if not hasattr(self.sim.demographics, 'pregnancy'):
             return ss.uids()
         preg = self.sim.demographics.pregnancy
-        candidates = self.ti_anc_visit.notnan.uids
-        if len(candidates) == 0:
+        hits = ss.uids()
+        for k in range(len(self.windows)):
+            arr = getattr(self, f'ti_visit_{k}')
+            candidates = arr.notnan.uids
+            if len(candidates) == 0:
+                continue
+            due = candidates[arr[candidates] == self.ti]
+            hits = hits | due
+        if len(hits) == 0:
             return ss.uids()
-        due = candidates[self.ti_anc_visit[candidates] == self.ti]
-        if len(due) == 0:
-            return ss.uids()
-        # Still pregnant + still alive at this ti
-        return due[preg.pregnant[due]]
+        return hits[preg.pregnant[hits]]
 
 
 ANC_PROBS_REALISTIC = [0.20, 0.30, 0.40, 0.35, 0.55, 0.70, 0.85]
@@ -93,7 +92,7 @@ ANC_YEARS = [1980, 1990, 1999, 2008, 2012, 2018, 2040]
 
 def make_syph_testing(stop=2040, symp_test_prob=None, rdt_year=2012,
                       anc_probs=None, anc_years=None,
-                      poc=False, intv_year=2027):
+                      poc=False, intv_year=2027, syph_anc_windows=None):
     """
     Symptomatic + ANC syphilis testing pathways.
 
@@ -221,7 +220,7 @@ def make_syph_testing(stop=2040, symp_test_prob=None, rdt_year=2012,
     # --- ANC channels (era-gated). SyphilisANCTimer picks one visit-week per
     # pregnancy; SyphTests read today_uids with dt_scale=False so anc_probs are
     # per-visit probabilities.
-    syph_anc_timer = SyphilisANCTimer()
+    syph_anc_timer = SyphilisANCTimer(windows=syph_anc_windows)
 
     def anc_eligibility(sim):
         sched = sim.interventions.get('syph_anc_timer')
