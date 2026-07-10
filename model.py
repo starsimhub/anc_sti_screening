@@ -21,12 +21,8 @@ DATA_DIR = 'data'
 
 
 def make_discharging_stis(care_seek_mult=1.0):
-    """
-    Build NG/CT/TV/BV disease modules. ``care_seek_mult`` scales the
-    symptomatic care-seeking probability for NG/CT/TV (clipped to [0,1]),
-    used as a scenario lever for demand-generation sweeps. Accepts:
-      * scalar: applied equally to F and M
-      * (mult_f, mult_m) tuple: sex-specific scaling
+    """Build NG/CT/TV/BV. `care_seek_mult` scales `p_symp_care` on NG/CT/TV
+    (scalar or (F, M) tuple), clipped to [0, 1].
     """
     if hasattr(care_seek_mult, '__len__'):
         mult_f, mult_m = float(care_seek_mult[0]), float(care_seek_mult[1])
@@ -73,10 +69,8 @@ def make_diseases(which='all', care_seek_mult=1.0,
                   care_timing_windows_months=(3, 6)):
     """Build the disease set + matching analyzers. Returns (dict, analyzers).
 
-    care_timing_windows_months controls the CareTimingAnalyzer windows
-    (per-episode "treated within N months of acquisition" metric); the
-    analyzer records one result per window per disease. Defaults to
-    (3, 6) so both policy thresholds are captured in one pass.
+    care_timing_windows_months: (lo, hi) months for the per-episode
+    "treated within N months of acquisition" analyzer.
     """
     d = sc.objdict(hiv=make_hiv())
     analyzers = []
@@ -85,7 +79,6 @@ def make_diseases(which='all', care_seek_mult=1.0,
         analyzers.append(sti.sw_stats(diseases=['ng', 'ct', 'tv']))
     if which in ('ulcerative', 'all'):
         d.syph, d.gudp = make_ulcerative_stis()
-        # Original analyzer kept for back-compat (tracks syph.infected, 15-49)
         analyzers.append(sti.coinfection_stats('syph', 'hiv', name='syph_hiv_coinfection'))
         # ZIMPHIA-matched: trep and nontrep at 15-64
         analyzers.append(sti.coinfection_stats(
@@ -94,12 +87,8 @@ def make_diseases(which='all', care_seek_mult=1.0,
         analyzers.append(sti.coinfection_stats(
             'syph', 'hiv', disease1_infected_state_name='nontrep',
             age_limits=[15, 64], name='syph_hiv_nontrep'))
-        # Transmission event recorder (Lorenz + transmission matrix)
         analyzers.append(SyphTransmissionEvents())
 
-    # Per-episode "treated within N months of acquisition" — stricter
-    # than tx_success / new_inf (which counts treatment events not
-    # episodes). Only meaningful when treatments exist; gate on which.
     if which == 'all':
         analyzers.append(CareTimingAnalyzer(
             disease_names=['ng', 'ct', 'tv', 'syph'],
@@ -147,50 +136,23 @@ def make_networks(dur_recall=ss.years(0.25)):
 def make_interventions(diseases, which='all', poc=None, poc_syph=None,
                        pn_pars=None, stop=2040,
                        syph_symp_test_prob=None, syph_anc_probs=None):
-    """Orchestrate intervention construction.
+    """Build intervention list: HIV → NG/CT/TV testing+treatment → PN → syph testing+treatment.
 
-    Layout (top to bottom in the returned list):
-      1. HIV interventions
-      2. NG/CT/TV testing + treatment (from make_testing)
-      3. Syph testing + treatment (from make_syph_testing)
-      4. PN intervention (from make_pn), shared across all diseases
-
-    PN is built once at this level with explicit pn_pars routing — it
-    is NOT built inside make_testing or make_syph_testing. POCPN /
-    SyndromicPN look up the per-disease tests / panels they route to
-    by name at step time.
-
-    poc controls the NG/CT/TV SymptomaticTesting panel; poc_syph
-    controls the syph ulcer-channel product swap (syndromic_gud →
-    gud2) at intv_year. Separated so an experiment can enable one
-    without the other. If poc_syph is None, it falls back to poc.
+    poc_syph falls back to poc if None. poc controls NG/CT/TV SymptomaticTesting;
+    poc_syph controls the syph ulcer-channel product swap independently.
     """
     if poc_syph is None:
         poc_syph = poc
     intvs = make_hiv_intvs()
     if which in ('discharging', 'all'):
         intvs += make_testing(poc=poc, stop=stop)
-    # Insert PN AFTER make_testing but BEFORE make_syph_testing. This
-    # order matters: POCPN.notify_attendees fires syph_pn_test.step on
-    # attending partners, which sets ti_positive. syph_tx (last
-    # intervention in make_syph_testing) reads ti_positive == ti to
-    # decide who to treat. If PN ran AFTER syph_tx, those PN-driven
-    # syph positives would never be treated — same-step they're missed
-    # (syph_tx already ran), next-step they're stale (ti_positive value
-    # no longer matches syph_tx.ti). NG/CT/TV cascades survive that bug
-    # because their treatments key off persistent tx.eligibility rather
-    # than per-step ti_positive.
+    # PN must run BEFORE make_syph_testing: syph_tx reads ti_positive set the
+    # same step by syph_pn_test, and would miss PN-driven positives if ordered after.
     if which in ('discharging', 'all'):
         intvs.append(make_pn(poc=poc, pn_pars=pn_pars))
     if which in ('ulcerative', 'all'):
         intvs += make_syph_testing(stop=stop, symp_test_prob=syph_symp_test_prob,
                                    anc_probs=syph_anc_probs, poc=bool(poc_syph))
-    # syph_care_seek_mult is applied as a multiplier on top of the
-    # (possibly calibrated) rel_test in build_sim, after set_pars_local
-    # has overridden any per-draw rel_test values. Doing it at
-    # construction would lose to set_pars_local. ANC and PN syph tests
-    # are not scaled — ANC is opportunistic, PN tests fire on notified
-    # attendees regardless of care-seeking.
     return intvs
 
 
@@ -202,19 +164,8 @@ def make_sim_parts(seed=1, n_agents=5e3, start=1985, stop=2030,
     """Return a dict of Sim kwargs ready for sti.Sim(**parts).
 
     Callers can inspect or mutate the returned dict before constructing
-    the Sim — useful for scenario interventions that need references to
-    the built disease/treatment modules (which are deep-copied by
-    sti.Sim on construction, invalidating any references captured
-    earlier).
-
-    care_seek_mult scales NG/CT/TV symptomatic care-seeking
-    (`p_symp_care` on each disease module). Syph symptomatic
-    care-seeking is scaled separately, at the experiment level — see
-    build_sim in run.py: after set_pars_local applies any calibrated
-    rel_test, the multiplier is composed on top via
-    `syph_symp_test.pars.rel_test *= care_seek_mult` (same for
-    syph_symp_test_poc + syph_rash_test). Doing it here at construction
-    would lose to set_pars_local overwriting it.
+    the Sim — useful for adding scenario interventions that need
+    references to the built disease and treatment modules.
     """
     diseases, analyzers = make_diseases(which, care_seek_mult=care_seek_mult)
     networks = make_networks(dur_recall)
@@ -224,25 +175,17 @@ def make_sim_parts(seed=1, n_agents=5e3, start=1985, stop=2030,
                                        syph_symp_test_prob=syph_symp_test_prob,
                                        syph_anc_probs=syph_anc_probs)
 
-    # FetalHealth tracks adverse birth outcomes (LBW, SGA, SVN, timing); the
-    # sti_fetal connector translates STI infections + treatments into
-    # FetalHealth API calls. Both go in `custom` so the standard
-    # auto-connector machinery (hiv_*, etc.) still runs.
+    # sti_fetal translates STI events into FetalHealth API calls.
     custom = [ss.FetalHealth(), sti_fetal()] if fetal_health else None
 
-    # The Zimbabwe demographics CSV in data/ encodes age-cohort values in
-    # thousands of people, so starsim's auto-derived total_pop comes out as
-    # ~8686 (literal). Override to the actual 1985 Zimbabwe population
-    # (~8.7M) so per-agent count outputs (new_infections, n_alive, etc.)
-    # scale to absolute people rather than thousands-of-thousands.
+    # total_pop=8.7e6 overrides the auto-derived value: the demographics CSV
+    # is in thousands so starsim would otherwise infer ~8686 literal agents.
     simpars = dict(
         rand_seed=seed, n_agents=n_agents,
         start=start, stop=stop,
         use_migration=False, verbose=verbose,
         total_pop=8.7e6,
     )
-    # Coinfection connectors auto-added by sti.Sim. GUDPlaceholder is named
-    # 'gudp' so the buggy `gud_syph` auto-connector isn't matched.
     return dict(
         pars=simpars,
         datafolder=f'{DATA_DIR}/',
@@ -259,8 +202,7 @@ def make_sim(interventions=(), analyzers=(), custom=(), **parts_kwargs):
     """Convenience wrapper: builds parts, appends extras, returns sti.Sim.
 
     For scenarios that need references to the built disease/treatment
-    modules when constructing extras, call make_sim_parts directly and
-    mutate the returned dict before passing to sti.Sim.
+    modules when constructing extras, call make_sim_parts directly.
     """
     parts = make_sim_parts(**parts_kwargs)
     if interventions:

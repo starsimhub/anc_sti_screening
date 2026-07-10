@@ -120,7 +120,7 @@ def build_scenario_sim(seed, scenario_id, assumption_id, draw_row,
     repo = Path(__file__).resolve().parent
     symp_test = pd.read_csv(repo / 'data' / 'symp_test_prob_concentrated.csv')
 
-    # Build the standard sim parts (with FetalHealth on for scenarios)
+    # Build the standard sim parts (with FetalHealth on)
     parts = make_sim_parts(
         seed=seed, n_agents=n_agents, start=start, stop=stop,
         which='all', fetal_health=True, verbose=-1,
@@ -128,9 +128,9 @@ def build_scenario_sim(seed, scenario_id, assumption_id, draw_row,
         syph_anc_probs=ANC_PROBS_REALISTIC,
     )
 
-    # ANC screens carry disease/treatment names (strings); ANCScreen resolves
-    # them against sim.diseases / sim.interventions in init_pre, since
-    # sti.Sim(**parts) deep-copies modules on construction.
+    # ANC screens carry disease/treatment names (strings); ANCScreen resolves them
+    # against sim.diseases / sim.interventions in init_pre, since sti.Sim(**parts)
+    # deep-copies modules on construction.
     anc_screens = _build_anc_screens(cell)
     parts['interventions'] = list(parts['interventions']) + anc_screens
     if bundled_prevention and anc_screens:
@@ -151,8 +151,7 @@ def build_scenario_sim(seed, scenario_id, assumption_id, draw_row,
 
     sim = sti.Sim(**parts)
 
-    # Apply the effect-size assumption to the post-construction sti_fetal instance
-    # (deep-copied — mutating the pre-construction one has no effect).
+    # Apply effect-size assumption to the post-construction sti_fetal instance.
     for mod in sim.pars.get('custom') or []:
         if getattr(mod, 'name', None) == 'sti_fetal':
             for k in ('ptb_shift_mean', 'growth_penalty',

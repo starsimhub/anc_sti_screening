@@ -2,11 +2,11 @@
 Interventions for the ANC STI screening model.
 
 Ported from sti_notification's interventions.py: make_testing, make_syph_testing,
-SyphilisANCTimer, CareSeekScaler, and module-level constants.
-PN classes (SyndromicPN, POCPN, PNIntensitySwitch) excluded; partner notification
-is out of scope for this project's first run. ANCScreen is a project-specific
-addition. DxRiskRedux unifies the old CondomCounseling (treatment-triggered)
-and ANCBundledPrevention (screen-triggered) mechanisms.
+SyphilisANCTimer, CareSeekScaler, and module-level constants. PN classes
+(SyndromicPN, POCPN, PNIntensitySwitch) excluded; partner notification is out
+of scope for this project's first run. ANCScreen is a project-specific addition.
+DxRiskRedux unifies the old CondomCounseling (treatment-triggered) and
+ANCBundledPrevention (screen-triggered) mechanisms.
 """
 
 import stisim as sti
@@ -21,12 +21,10 @@ from pn import PartnerNotification, pn_rates
 class SyphilisANCTimer(ss.Intervention):
     """Schedule one ANC syph test event per pregnancy at a realistic week.
 
-    In Zimbabwe many pregnant women do not attend ANC in tri1 as WHO
-    recommends; visits are spread across weeks 8-32 of gestation. This
-    intervention draws a single visit-week for each newly-conceived
+    This intervention draws a single visit-week for each newly-conceived
     woman from Uniform(8, 32) and marks her as ANC-test-eligible on
-    that timestep. Downstream `SyphTest` interventions read from
-    ``today_uids`` to fire the actual test.
+    that timestep. The `SyphTest` intervention reads from ``today_uids``
+    to perform the actual test.
 
     States:
         ti_anc_visit (FloatArr): timestep on which the woman will
@@ -44,33 +42,24 @@ class SyphilisANCTimer(ss.Intervention):
     def __init__(self, pars=None, name='syph_anc_timer', **kwargs):
         super().__init__(name=name)
         self.define_pars(
-            visit_week=ss.uniform(low=8, high=32),  # CRN-safe Dist
+            visit_week=ss.uniform(low=ss.weeks(8), high=ss.weeks(32)),  
         )
         self.update_pars(pars=pars, **kwargs)
         self.define_states(
-            ss.FloatArr('ti_anc_visit', default=np.nan,
-                        label='ti of scheduled ANC visit'),
+            ss.FloatArr('ti_anc_visit', label='ti of scheduled ANC visit'),
         )
         return
 
     def _schedule(self, uids):
-        """Draw a visit-week per woman and convert to a future ti."""
+        """Draw a visit-week per woman."""
         if len(uids) == 0:
             return
         preg = self.sim.demographics.pregnancy
-        # CRN-safe per-agent draw; ss.uniform().rvs keys on uids.
         weeks = self.pars.visit_week.rvs(uids)
-        # Convert weeks → ti steps. preg.ti_pregnant[uids] is the
-        # conception ti; visit_ti = conception_ti + round(weeks / weeks_per_step).
-        # dt_year is the timestep duration in years; *52 → weeks per step.
-        weeks_per_step = self.t.dt_year * 52.0 if self.t.dt_year else 4.33
-        steps_to_visit = np.round(weeks / max(weeks_per_step, 1e-6)).astype(int)
-        self.ti_anc_visit[uids] = preg.ti_pregnant[uids] + steps_to_visit
+        self.ti_anc_visit[uids] = preg.ti_pregnant[uids] + weeks
 
     def init_post(self):
         super().init_post()
-        # Cover the cohort already pregnant at sim start so they don't
-        # miss out. Treat them like newly-conceived for scheduling.
         if hasattr(self.sim.demographics, 'pregnancy'):
             preg = self.sim.demographics.pregnancy
             self._schedule(preg.pregnant.uids)
@@ -94,7 +83,7 @@ class SyphilisANCTimer(ss.Intervention):
         if len(due) == 0:
             return ss.uids()
         # Still pregnant + still alive at this ti
-        return due[preg.pregnant[due] & self.sim.people.alive[due]]
+        return due[preg.pregnant[due]]
 
 
 ANC_PROBS_REALISTIC = [0.20, 0.30, 0.40, 0.35, 0.55, 0.70, 0.85]
@@ -129,19 +118,9 @@ def make_syph_testing(stop=2040, symp_test_prob=None, rdt_year=2012,
         anc_years = ANC_YEARS
 
     syph_dx_df = pd.read_csv(f'data/syph_dx.csv')
-    # Two-channel syndromic syph dx:
-    #   - Ulcer channel (chancre_visible | gudp.symptomatic) uses
-    #     syndromic_gud (universal 0.8): real-world syndromic
-    #     management of GUD presents is presumptive treatment of any
-    #     ulcer-presenter (true syph or HSV/chancroid), regardless of
-    #     stage. The gudp.symptomatic pool gives the false-positive
-    #     presumptive-treatment population AND the latent-syph
-    #     incidental-treatment pathway (latents who happen to have a
-    #     concurrent non-syph ulcer get treated for syph too).
-    #   - Rash channel (rash_visible) uses syndromic_rash (0.1
-    #     universal): secondary-syph rash presenters rarely make it
-    #     to STI-clinic syph treatment under real-world syndromic
-    #     flows. Modelled as a weak fallback.
+    # Two syndromic syph channels: ulcer (chancre|gudp.symptomatic → syndromic_gud
+    # at 0.8; presumptive treatment for any ulcer-presenter) and rash (rash_visible
+    # → syndromic_rash at 0.1; secondary syph rarely reaches STI-clinic treatment).
     gud_dx  = sti.SyphDx(syph_dx_df[syph_dx_df.name == 'syndromic_gud'],
                          name='SyphDx_gud')
     rash_dx = sti.SyphDx(syph_dx_df[syph_dx_df.name == 'syndromic_rash'],
@@ -150,30 +129,19 @@ def make_syph_testing(stop=2040, symp_test_prob=None, rdt_year=2012,
     dual_dx = sti.SyphDx(syph_dx_df[syph_dx_df.name == 'dual'], name='SyphDx_dual')
 
     def syph_dx_eligibility(sim):
-        """Treat anyone newly diagnosed positive by any treatment-triggering
-        syph test this step.
+        """Treat anyone newly diagnosed positive by any treatment-triggering syph test.
 
-        ANC pathway:
-          * Pre-intv_year (or non-POC arms): `syph_anc_rdt` positives go
-            straight to treatment. This matches calibration era practice
-            (no confirmatory step) and matches arm A throughout.
-          * POC arms after intv_year: `syph_anc_confirm` (rpr-product
-            confirm of dual RDT positives) replaces `syph_anc_rdt` in the
-            treatment-triggering list. The dual RDT becomes screen-only
-            so previously-cured women whose treponemal antibodies still
-            light up the dual RDT don't get re-treated.
-
-        Robust to optional tests: missing tests are skipped.
+        ANC pathway: pre-intv_year or non-POC uses syph_anc_rdt directly; POC
+        arms after intv_year switch to syph_anc_confirm (rpr of dual-RDT positives)
+        so treponemal-antibody-carrying cured women aren't re-treated.
         """
         intv = sim.interventions
         treat_tests = ['syph_symp_test', 'syph_symp_test_poc',
                        'syph_rash_test', 'syph_anc_rpr',
                        'syph_pn_test']
         confirm = intv.get('syph_anc_confirm')
-        # Switch to confirm only once confirm has started (post intv_year);
-        # before that, anc_rdt remains the ANC treatment trigger even in
-        # POC arms — otherwise pre-2027 ANC syph treatment silently
-        # disappears in POC sims, breaking the calibration baseline.
+        # Keep anc_rdt as treatment-trigger until confirm actually starts —
+        # otherwise pre-2027 POC sims lose ANC syph treatment silently.
         if confirm is not None and sim.now >= confirm.start:
             treat_tests.append('syph_anc_confirm')
         else:
@@ -195,20 +163,8 @@ def make_syph_testing(stop=2040, symp_test_prob=None, rdt_year=2012,
         gudp = sim.diseases.gudp
         return syph.chancre_visible | gudp.symptomatic
 
-    # dt_scale=False: the CSV values are per-symptomatic-episode (visible
-    # chancres last ~1 month, the symptomatic window matches a single dt
-    # step). With dt_scale=True (stisim default) these would have been
-    # divided by 12 → effectively no symptomatic treatment of primary syph,
-    # which was a silent bug.
-    # rel_test scales the per-step test probability inside SyphTest
-    # (stisim base STITest line ~195: test_prob *= self.pars.rel_test,
-    # then clipped to [0, 1]). For care-seeking demand-gen we apply
-    # care_seek_mult as a MULTIPLIER on top of whatever rel_test ends
-    # up at — which matters because the calibration pipeline overrides
-    # syph_symp_test.rel_test via set_pars_local after construction.
-    # The applied scaling happens in build_sim (run.py) post-init, NOT
-    # here at construction time. ANC pathway is not scaled — ANC is
-    # opportunistic, not care-seeking-driven.
+    # dt_scale=False because CSV values are per-episode; stisim's default
+    # dt_scale=True would divide by 12 and effectively drop primary-syph treatment.
     syph_symp_test = sti.SyphTest(
         name='syph_symp_test', label='syph_symp_test',
         product=gud_dx,
@@ -217,25 +173,10 @@ def make_syph_testing(stop=2040, symp_test_prob=None, rdt_year=2012,
         dt_scale=False,
     )
 
-    # --- POC ulcer channel (intervention scenarios) ---
-    # When poc=True:
-    #   * syph_symp_test_poc replaces syph_symp_test after intv_year for
-    #     symptomatic ulcer presenters, using the gud2 product (0.95
-    #     primary / 0.95 secondary / 0.05 elsewhere) — a definitive
-    #     etiological POC test for ulcer-presenting syph.
-    #   * syph_pn_test handles PN attendees, who are mostly asymptomatic
-    #     (notified because their index partner just got diagnosed) and
-    #     often in primary stage themselves (recently infected by the
-    #     index). It uses the rpr (non-treponemal) product, picked
-    #     deliberately over dual because (1) dual has only 0.20 sens for
-    #     primary syph — exactly the stage PN-attendees are most likely
-    #     in — whereas rpr is 0.90 across primary/secondary/latent/
-    #     tertiary; and (2) dual gives 0.95 false-positive on previously
-    #     cured patients (treponemal antibodies persist after cure) which
-    #     blew up unnecessary re-treatment under elevated PN, while rpr
-    #     turns negative after cure (sus_not_naive = 0.05). No
-    #     eligibility filter — fires only when called with explicit uids
-    #     from POCPN.notify_attendees.
+    # POC ulcer channel (poc=True): syph_symp_test_poc uses gud2 (0.95/0.95/0.05)
+    # for ulcer presenters after intv_year; syph_pn_test uses rpr (not dual)
+    # because dual has 0.20 primary-sens and 0.95 FP on cured patients — bad
+    # for PN attendees who are typically primary or previously-treated.
     syph_symp_test_poc = None
     syph_pn_test = None
     if poc:
@@ -277,11 +218,9 @@ def make_syph_testing(stop=2040, symp_test_prob=None, rdt_year=2012,
         dt_scale=False,
     )
 
-    # --- ANC channels (era-gated) ---
-    # SyphilisANCTimer schedules a single ANC-visit timestep per pregnancy
-    # at a realistic gestational week. The SyphTest products read from its
-    # today_uids and (with dt_scale=False) the listed anc_probs values are
-    # the per-visit testing probability.
+    # --- ANC channels (era-gated). SyphilisANCTimer picks one visit-week per
+    # pregnancy; SyphTests read today_uids with dt_scale=False so anc_probs are
+    # per-visit probabilities.
     syph_anc_timer = SyphilisANCTimer()
 
     def anc_eligibility(sim):
@@ -310,14 +249,9 @@ def make_syph_testing(stop=2040, symp_test_prob=None, rdt_year=2012,
     )
     syph_anc_rdt.start = rdt_year
 
-    # ANC confirmatory POC test (POC arms only). The dual RDT used for
-    # ANC screening has 0.95 false-positive on previously-cured women
-    # (treponemal memory). Without confirmation, every previously-treated
-    # woman who returns for ANC gets re-treated. In POC arms we add a
-    # non-treponemal RPR confirmation step: only women whose dual RDT
-    # AND rpr both fire positive proceed to syph_tx. The 0.05 FP-on-cured
-    # of rpr cuts the over-treatment loop. Eligibility = women whose
-    # syph_anc_rdt set ti_positive this step.
+    # POC-arm ANC confirmatory test: RPR follow-up on dual-RDT positives.
+    # Cuts the re-treatment loop where treponemal-antibody-carrying cured
+    # women trigger the RDT on every ANC visit.
     syph_anc_confirm = None
     if poc:
         def anc_confirm_eligibility(sim):
@@ -569,8 +503,9 @@ SYNDROMIC_TX_MIX_NONCERV = dict(
     mtnz=[0.25, 0.00],
     none=[0.25, 0.10],
 )
-# POC etiological-test accuracy used for the symptomatic-testing panel.
-# sti.SymptomaticTesting expects {disease: [F, M]} dicts.
+# POC etiological-test accuracy used for the symptomatic-testing panel
+# and for FSW outreach. sti.SymptomaticTesting expects
+# {disease: [F, M]} dicts.
 POC_SENS = {'ng': [0.95, 0.95], 'ct': [0.95, 0.95], 'tv': [0.95, 0.95]}
 POC_SPEC = {'ng': [0.95, 0.95], 'ct': [0.95, 0.95], 'tv': [0.95, 0.95]}
 
@@ -579,13 +514,9 @@ def make_testing(poc=None, stop=2040):
 
     intv_year = 2027
 
-    # Don't shorten syndromic_vds.stop / syndromic_uds.stop in POC mode.
-    # sti.SyndromicManagement.step resets every linked treatment's
-    # eligibility to ss.uids() on every post-stop step — which would
-    # wipe whatever the POC panel sets on ng_tx/ct_tx/metronidazole,
-    # leaving no NG/CT/TV treatment in POC arms. Instead, gate the
-    # syndromic care-seekers' eligibility callable to return empty after
-    # intv_year so the step is a clean no-op.
+    # Keep syndromic_vds/uds .stop == sim stop: shortening it makes their step
+    # wipe ng/ct/tv_tx.eligibility every post-stop tick, blocking POC treatment.
+    # POC mode gates via the eligibility callable instead (see below).
     synd_end = stop
 
     # Symptomatic care-seekers, baseline (pre-POC) — used by both
@@ -596,9 +527,6 @@ def make_testing(poc=None, stop=2040):
         ng_care = dis.ng.symptomatic & (dis.ng.ti_seeks_care == dis.ng.ti) & female
         tv_care = dis.tv.symptomatic & (dis.tv.ti_seeks_care == dis.tv.ti) & female
         ct_care = dis.ct.symptomatic & (dis.ct.ti_seeks_care == dis.ct.ti) & female
-        # Symptomatic BV also presents as vaginal discharge. This relies on
-        # SimpleBV (which has its own symptomatic + ti_seeks_care states);
-        # BV is female-only, so it enters VDS but not the UDS path.
         bv_care = dis.bv.symptomatic & (dis.bv.ti_seeks_care == dis.bv.ti) & female
         return (ng_care | ct_care | tv_care | bv_care).uids
 
@@ -671,13 +599,9 @@ def make_testing(poc=None, stop=2040):
 
     intvs = [syndromic_vds, syndromic_uds, ng_tx, ct_tx, metronidazole]
     if poc:
-        # POC etiological panel: single eligibility filter for both sexes,
-        # high-sensitivity molecular test per pathogen, no presumptive
-        # metronidazole. Replaces syndromic_vds and syndromic_uds after
-        # intv_year. negative_treatments=[] disables the metro-for-VDS-
-        # negatives routing (p_mtnz defaults to 0 anyway, but the empty
-        # list also avoids the iteration over None in
-        # SymptomaticTesting.step).
+        # POC etiological panel replaces syndromic_vds/uds after intv_year:
+        # single eligibility for both sexes, per-pathogen molecular tests, no
+        # presumptive metronidazole (empty negative_treatments=[]).
         disease_treatment_map = {'ng': ng_tx, 'ct': ct_tx, 'tv': metronidazole}
         panel = sti.SymptomaticTesting(
             name='panel', label='panel',
@@ -691,30 +615,12 @@ def make_testing(poc=None, stop=2040):
         )
         intvs.append(panel)
 
-    # PN intervention is built separately by make_pn() and appended at
-    # the top level (make_interventions). That keeps the asymmetry
-    # explicit: make_testing builds NG/CT/TV testing + treatments,
-    # make_syph_testing builds syph testing + treatment, and make_pn
-    # builds the single PN intervention shared across all diseases.
-
+    # PN is built by make_pn() at the top level (make_interventions).
     return intvs
 
 
 class DxRiskRedux(ss.Intervention):
     """Post-event rel_sus reduction (condom counselling / bundled prevention).
-
-    On each step, polls the configured `triggers` (intervention names) for
-    agents whose `trigger_attr` (e.g. `ti_treated` on a treatment,
-    `ti_tested` on a screen) matches the current ti. Enrolls a `coverage`
-    fraction into a protection window sampled from `dur`, during which
-    their acquisition rel_sus for the listed `diseases` is multiplied by
-    `(1 - eff)`.
-
-    Unifies the old CondomCounseling (treatment-triggered) and
-    ANCBundledPrevention (screen-triggered) mechanisms behind one class:
-    the difference is just which intervention names and which ti_attr you
-    point it at.
-
     Args:
         triggers (iterable):  intervention names to listen to.
         trigger_attr (str):   name of the `ti_*` attribute on each trigger
@@ -801,23 +707,6 @@ class DxRiskRedux(ss.Intervention):
 
 class CareSeekScaler(ss.Intervention):
     """Defer the symptomatic care-seeking multiplier to intv_year.
-
-    Mirrors how POC / PN / BP activate at intv_year while pre-2027 behavior
-    matches the calibrated SOC baseline. Without this, scaling NG/CT/TV
-    `p_symp_care` or syph testing `rel_test` at sim construction rewrites
-    history all the way back to 1985 and pre-2027 trajectories diverge
-    across cells with different `care` settings.
-
-    On the first step at or after `start`:
-      * NG / CT / TV `pars.p_symp_care` is multiplied (sex-stratified, clipped
-        to 1.0).
-      * Each named syph testing intervention's `pars.rel_test` is multiplied
-        by the scalar form of the multiplier.
-
-    Note: `p_symp_care` is read at infection time (`set_care_seeking`), not
-    at care-seeking time. Agents already infected when this fires keep their
-    stamped `ti_seeks_care`; only new infections after `start` use the
-    scaled probability. A few-month transition period is expected.
     """
 
     def __init__(self, mult=1.0, start=2027,
@@ -882,8 +771,7 @@ class CareSeekScaler(ss.Intervention):
         return
 
 
-# %% ANCScreen class (from original anc_sti_screening interventions.py)
-# Preserved for Task 3.5 (ANC screening scenarios).
+# % ANCScreen class
 
 class ANCScreen(sti.STITest):
     """
@@ -895,7 +783,7 @@ class ANCScreen(sti.STITest):
 
     Args:
         diseases (list):               disease name strings (resolved to modules in init_pre)
-        treatments (list):             treatment name strings (resolved to interventions in init_pre)
+        treatments (list):             treatment name strings (resolved to modules in init_pre)
         disease_treatment_map (dict):  disease name → treatment name
         test_sensitivity (dict):       per-disease-name test sensitivity
         screen_prob (float/array):     probability of being screened at ANC
@@ -904,10 +792,10 @@ class ANCScreen(sti.STITest):
         ga_min (float):                minimum gestational age (weeks) for eligibility
         ga_max (float):                maximum gestational age (weeks) for eligibility
 
-    Diseases and treatments are stored as names rather than module instances
-    because sti.Sim(**parts) deep-copies modules on construction, invalidating
-    any references captured beforehand. Names are resolved against sim.diseases
-    and sim.interventions inside init_pre.
+    Diseases and treatments are stored as names rather than instances because
+    `sti.Sim(**parts)` deep-copies modules on construction, invalidating any
+    references captured beforehand. Names get resolved against `sim.diseases`
+    and `sim.interventions` inside `init_pre`.
     """
 
     def __init__(self, pars=None, diseases=None, treatments=None,
@@ -938,7 +826,7 @@ class ANCScreen(sti.STITest):
         self.ga_min = ga_min
         self.ga_max = ga_max
 
-        # Distribution for sensitivity sampling
+        # Distribution for sensitivity sampling - overwritten below with the values from pars
         self._sens_dist = ss.bernoulli(p=0.5)
 
         self.screen_prob_data = screen_prob_data
@@ -989,7 +877,7 @@ class ANCScreen(sti.STITest):
         # Identify pregnant women eligible for screening
         # Pregnant women who haven't been screened this pregnancy (by this instance)
         pregnant = ppl.pregnancy.pregnant
-        never_tested = np.isnan(self.ti_tested.values)
+        never_tested = self.ti_tested.isnan
         tested_before_this_pregnancy = self.ti_tested < ppl.pregnancy.ti_pregnant
         eligible = pregnant & ppl.female & (never_tested | tested_before_this_pregnancy)
 
@@ -1000,7 +888,7 @@ class ANCScreen(sti.STITest):
 
         # Filter by gestational age window (in weeks) if specified
         if self.ga_min is not None or self.ga_max is not None:
-            ga_weeks = np.asarray(ppl.pregnancy.gestation[eligible_uids], dtype=float)
+            ga_weeks = ppl.pregnancy.gestation[eligible_uids]
             in_window = np.ones(len(eligible_uids), dtype=bool)
             if self.ga_min is not None:
                 in_window &= ga_weeks >= self.ga_min
