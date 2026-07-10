@@ -963,15 +963,20 @@ class ANCScreen(sti.STITest):
     screens (e.g. enrollment ≤24w + third-trimester 32-34w).
 
     Args:
-        diseases (list):               disease modules to screen for
-        treatments (list):             treatment modules to apply
-        disease_treatment_map (dict):  maps disease name → treatment module
-        test_sensitivity (dict):       per-disease test sensitivity
+        diseases (list):               disease name strings (resolved to modules in init_pre)
+        treatments (list):             treatment name strings (resolved to interventions in init_pre)
+        disease_treatment_map (dict):  disease name → treatment name
+        test_sensitivity (dict):       per-disease-name test sensitivity
         screen_prob (float/array):     probability of being screened at ANC
         screen_prob_data (array):      time-varying screening probability
         years (array):                 years corresponding to screen_prob_data
         ga_min (float):                minimum gestational age (weeks) for eligibility
         ga_max (float):                maximum gestational age (weeks) for eligibility
+
+    Diseases and treatments are stored as names rather than module instances
+    because sti.Sim(**parts) deep-copies modules on construction, invalidating
+    any references captured beforehand. Names are resolved against sim.diseases
+    and sim.interventions inside init_pre.
     """
 
     def __init__(self, pars=None, diseases=None, treatments=None,
@@ -987,15 +992,15 @@ class ANCScreen(sti.STITest):
         )
         self.update_pars(pars, **kwargs)
 
-        self.diseases = sc.tolist(diseases)
-        self.treatments = sc.tolist(treatments)
-        if disease_treatment_map is None:
-            disease_treatment_map = {}
-        self.disease_treatment_map = disease_treatment_map
+        self._disease_names = list(sc.tolist(diseases))
+        self._treatment_names = list(sc.tolist(treatments))
+        self.disease_treatment_map = dict(disease_treatment_map) if disease_treatment_map else {}
+        self.diseases = []
+        self.treatments = []
 
-        # Per-disease test sensitivity (default: perfect test)
+        # Per-disease test sensitivity (default: perfect test), keyed by disease name
         if test_sensitivity is None:
-            test_sensitivity = {d.name: 1.0 for d in self.diseases}
+            test_sensitivity = {n: 1.0 for n in self._disease_names}
         self.test_sensitivity = test_sensitivity
 
         # GA window for eligibility (in weeks); None means no constraint
@@ -1011,6 +1016,15 @@ class ANCScreen(sti.STITest):
         return
 
     def init_pre(self, sim):
+        # Resolve name strings → module instances BEFORE super().init_pre,
+        # since init_results iterates self.diseases to build per-disease Result keys.
+        self.diseases = [sim.diseases[n] for n in self._disease_names]
+        self.treatments = [sim.interventions[n] for n in self._treatment_names]
+        self.disease_treatment_map = {
+            dname: sim.interventions[tname]
+            for dname, tname in self.disease_treatment_map.items()
+        }
+
         super().init_pre(sim)
 
         # Interpolate screening probability over time if data provided

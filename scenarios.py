@@ -105,9 +105,11 @@ def build_scenario_sim(seed, scenario_id, assumption_id, draw_row,
         starsim.Sim: initialised sim, ready to run.
     """
     import pandas as pd
-    from model import make_sim
+    import stisim as sti
+    from model import make_sim_parts
     from apply_draw import row_to_sim_pars, set_pars_local
-    from interventions import ANC_PROBS_REALISTIC, ANCScreen
+    from interventions import ANC_PROBS_REALISTIC
+    from analyzers import birth_outcome_dalys
 
     cell = INTERVENTION_SCENARIOS[scenario_id]
     assumption = EFFECT_SIZE_ASSUMPTIONS[assumption_id]
@@ -117,14 +119,26 @@ def build_scenario_sim(seed, scenario_id, assumption_id, draw_row,
     repo = Path(__file__).resolve().parent
     symp_test = pd.read_csv(repo / 'data' / 'symp_test_prob_concentrated.csv')
 
-    # Build the sim (with FetalHealth on for scenarios)
-    sim = make_sim(seed=seed, n_agents=n_agents, start=start, stop=stop,
-                   which='all', fetal_health=True, verbose=-1,
-                   syph_symp_test_prob=symp_test,
-                   syph_anc_probs=ANC_PROBS_REALISTIC)
+    # Build the standard sim parts (with FetalHealth on for scenarios)
+    parts = make_sim_parts(
+        seed=seed, n_agents=n_agents, start=start, stop=stop,
+        which='all', fetal_health=True, verbose=-1,
+        syph_symp_test_prob=symp_test,
+        syph_anc_probs=ANC_PROBS_REALISTIC,
+    )
 
-    # Apply the effect-size assumption to sti_fetal
-    for mod in sim.pars.get('custom', []) or []:
+    # ANC screens carry disease/treatment names (strings); ANCScreen resolves
+    # them against sim.diseases / sim.interventions in init_pre, since
+    # sti.Sim(**parts) deep-copies modules on construction.
+    anc_screens = _build_anc_screens(cell)
+    parts['interventions'] = list(parts['interventions']) + anc_screens
+    parts['analyzers'] = list(parts['analyzers']) + [birth_outcome_dalys(start=start)]
+
+    sim = sti.Sim(**parts)
+
+    # Apply the effect-size assumption to the post-construction sti_fetal instance
+    # (deep-copied — mutating the pre-construction one has no effect).
+    for mod in sim.pars.get('custom') or []:
         if getattr(mod, 'name', None) == 'sti_fetal':
             for k in ('ptb_shift_mean', 'growth_penalty',
                        'tx_residual_growth', 'tx_residual_timing'):
@@ -132,7 +146,7 @@ def build_scenario_sim(seed, scenario_id, assumption_id, draw_row,
                     mod.pars[k] = assumption[k]
             break
 
-    # Apply calibration params
+    # Apply calibration params (set_pars_local finds modules by name across containers)
     sim_pars = row_to_sim_pars(draw_row)
     set_pars_local(sim, sim_pars)
 
@@ -142,20 +156,13 @@ def build_scenario_sim(seed, scenario_id, assumption_id, draw_row,
             mod.store_sw = True
             break
 
-    # Add ANC screening interventions per the scenario cell
-    _add_anc_screens(sim, cell)
-
-    # Add the birth-outcome DALY analyzer (not included in make_sim defaults)
-    from analyzers import birth_outcome_dalys
-    sim.pars['analyzers'].append(birth_outcome_dalys(start=start))
-
     return sim
 
 
-def _add_anc_screens(sim, cell):
-    """Add ANC screening interventions per the scenario cell.
+def _build_anc_screens(cell):
+    """Build ANCScreen instances for a scenario cell using name strings.
 
-    n_screens == 0: SOC, add nothing.
+    n_screens == 0: SOC, return [].
     n_screens == 1: enrolment screen only (ga <= 24w).
     n_screens == 2: enrolment (ga <= 24w) + 3rd trimester (ga 32-34w).
     """
@@ -164,35 +171,20 @@ def _add_anc_screens(sim, cell):
     coverage = cell['coverage']
 
     if n_screens == 0:
-        return
+        return []
 
-    # Get the disease modules to screen for (NG, CT, TV)
-    diseases = []
-    for name in ('ng', 'ct', 'tv'):
-        for d in sim.pars['diseases']:
-            if getattr(d, 'name', None) == name:
-                diseases.append(d)
-                break
+    diseases = ['ng', 'ct', 'tv']
+    tx_map = {'ng': 'ng_tx', 'ct': 'ct_tx', 'tv': 'metronidazole'}
+    treatments = list(tx_map.values())
 
-    if not diseases:
-        return
-
-    # Enrolment screen (<=24w GA)
-    enrol = ANCScreen(
+    common = dict(
         diseases=diseases,
+        treatments=treatments,
+        disease_treatment_map=tx_map,
         screen_prob=coverage,
-        ga_min=0, ga_max=24,
-        name='anc_enroll', label='anc_enroll',
         start=2028,
     )
-    sim.pars['interventions'].append(enrol)
-
+    screens = [ANCScreen(ga_min=0, ga_max=24, name='anc_enroll', label='anc_enroll', **common)]
     if n_screens == 2:
-        tri3 = ANCScreen(
-            diseases=diseases,
-            screen_prob=coverage,
-            ga_min=32, ga_max=34,
-            name='anc_tri3', label='anc_tri3',
-            start=2028,
-        )
-        sim.pars['interventions'].append(tri3)
+        screens.append(ANCScreen(ga_min=32, ga_max=34, name='anc_tri3', label='anc_tri3', **common))
+    return screens
