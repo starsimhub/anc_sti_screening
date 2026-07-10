@@ -2,10 +2,11 @@
 Interventions for the ANC STI screening model.
 
 Ported from sti_notification's interventions.py: make_testing, make_syph_testing,
-SyphilisANCTimer, FSWOutreach, CondomCounseling, CareSeekScaler, and module-level
-constants. PN classes (SyndromicPN, POCPN, PNIntensitySwitch) excluded; partner
-notification is out of scope for this project's first run. ANCScreen class preserved
-from the original anc_sti_screening interventions.py (needed for Task 3.5).
+SyphilisANCTimer, FSWOutreach, CareSeekScaler, and module-level constants.
+PN classes (SyndromicPN, POCPN, PNIntensitySwitch) excluded; partner notification
+is out of scope for this project's first run. ANCScreen is a project-specific
+addition. DxRiskRedux unifies the old CondomCounseling (treatment-triggered)
+and ANCBundledPrevention (screen-triggered) mechanisms.
 """
 
 import stisim as sti
@@ -764,64 +765,59 @@ def make_testing(poc=None, stop=2040, fsw_outreach=False,
     return intvs
 
 
-class CondomCounseling(ss.Intervention):
-    """Condoms/counselling for the diagnosed (promoted from archived exp 06).
+class DxRiskRedux(ss.Intervention):
+    """Post-event rel_sus reduction (condom counselling / bundled prevention).
 
-    When an agent is treated for an STI, with probability ``coverage`` they are
-    enrolled in a protection window of ``dur``: during it their re-acquisition
-    susceptibility (``rel_sus``) for the protected diseases is multiplied by
-    ``(1 - eff)``. Acquisition only; onward transmission is left untouched.
+    On each step, polls the configured `triggers` (intervention names) for
+    agents whose `trigger_attr` (e.g. `ti_treated` on a treatment,
+    `ti_tested` on a screen) matches the current ti. Enrolls a `coverage`
+    fraction into a protection window sampled from `dur`, during which
+    their acquisition rel_sus for the listed `diseases` is multiplied by
+    `(1 - eff)`.
 
-    The multiplier is applied multiplicatively each step, matching how the
-    disease risk factors and coinfection connectors (hiv_sti, bv) compose on
-    ``rel_sus``. Each disease's ``step_state`` resets ``rel_sus[:] = 1`` and
-    connectors re-apply their cofactors before interventions run, so
-    multiplying the currently-protected set here both composes with those
-    cofactors and self-expires when an agent leaves the protected set — no
-    reset bookkeeping needed beyond ``ti_protect_end``.
+    Unifies the old CondomCounseling (treatment-triggered) and
+    ANCBundledPrevention (screen-triggered) mechanisms behind one class:
+    the difference is just which intervention names and which ti_attr you
+    point it at.
 
-    Default protected diseases are NG / CT / TV / syph. Syph is included
-    because PN-driven curative treatment without a protection window drives
-    re-infection churn (cured agent returns to fully-susceptible immediately),
-    which inflates incidence even as prevalence drops. Adding syph to the
-    protection window breaks that loop and lets BP blunt the PN-driven churn.
+    Args:
+        triggers (iterable):  intervention names to listen to.
+        trigger_attr (str):   name of the `ti_*` attribute on each trigger
+                              intervention to poll (e.g. 'ti_treated' for
+                              treatment interventions, 'ti_tested' for screens).
+        diseases (iterable):  disease names whose rel_sus gets multiplied.
     """
 
-    def __init__(self, coverage=0.5, eff=0.5, dur=ss.months(6),
+    def __init__(self, pars=None, triggers=(), trigger_attr='ti_treated',
                  diseases=('ng', 'ct', 'tv', 'syph'),
-                 trigger_tx=('ng_tx', 'ct_tx', 'metronidazole', 'syph_tx'),
-                 start=2027, name='condom_counseling', *args, **kwargs):
+                 start=2027, name='dx_risk_redux', **kwargs):
         super().__init__(name=name)
         self.define_pars(
-            coverage=ss.bernoulli(p=coverage),
-            eff=eff,
-            dur=dur,
+            coverage=ss.bernoulli(p=0.5),
+            eff=0.5,
+            dur=ss.constant(ss.months(6)),
         )
-        self.update_pars(*args, **kwargs)
+        self.update_pars(pars, **kwargs)
         self.diseases = list(diseases)
-        self.trigger_tx = list(trigger_tx)
+        self.triggers = list(triggers)
+        self.trigger_attr = trigger_attr
         self.start = start
-        self._window_steps = None
         self.define_states(
             ss.FloatArr('ti_protect_end', default=np.nan),
         )
         return
 
-    def init_pre(self, sim):
-        super().init_pre(sim)
-        dt_year = sim.t.dt_year if sim.t.dt_year else 1 / 12
-        dur_years = self.pars.dur.years if hasattr(self.pars.dur, 'years') else float(self.pars.dur)
-        self._window_steps = max(1, int(round(dur_years / dt_year)))
-        return
-
-    def _newly_treated(self):
+    def _newly_triggered(self):
         ti = self.ti
         uids = ss.uids()
-        for name in self.trigger_tx:
-            tx = self.sim.interventions.get(name)
-            if tx is None or not hasattr(tx, 'ti_treated'):
+        for name in self.triggers:
+            intv = self.sim.interventions.get(name)
+            if intv is None:
                 continue
-            uids = uids | (tx.ti_treated == ti).uids
+            ti_arr = getattr(intv, self.trigger_attr, None)
+            if ti_arr is None:
+                continue
+            uids = uids | (ti_arr == ti).uids
         return uids
 
     def step(self):
@@ -830,18 +826,18 @@ class CondomCounseling(ss.Intervention):
             return
         ti = self.ti
 
-        treated = self._newly_treated()
-        if len(treated):
-            enroll = self.pars.coverage.filter(treated)
-            if len(enroll):
-                self.ti_protect_end[enroll] = ti + self._window_steps
+        triggered = self._newly_triggered()
+        n_enrolled = 0
+        if len(triggered):
+            enroll = self.pars.coverage.filter(triggered)
+            n_enrolled = len(enroll)
+            if n_enrolled:
+                self.ti_protect_end[enroll] = ti + self.pars.dur.rvs(enroll)
+        self._n_enrolled_this_step = n_enrolled
 
         protected = (self.ti_protect_end > ti).uids
         if not len(protected):
             return
-        # Multiply, don't overwrite: step_state has reset rel_sus[:]=1 and
-        # connectors have re-applied their cofactors this step, so this
-        # composes with them and self-expires when agents leave `protected`.
         factor = 1.0 - float(self.pars.eff)
         for d in self.diseases:
             dis = sim.diseases.get(d)
@@ -864,7 +860,7 @@ class CondomCounseling(ss.Intervention):
         super().update_results()
         ti = self.ti
         self.results['n_protected'][ti] = int((self.ti_protect_end > ti).sum())
-        self.results['new_enrolled'][ti] = int((self.ti_protect_end == ti + self._window_steps).sum())
+        self.results['new_enrolled'][ti] = int(getattr(self, '_n_enrolled_this_step', 0))
         return
 
 

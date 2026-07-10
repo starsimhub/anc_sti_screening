@@ -89,7 +89,8 @@ assert len(EFFECT_SIZE_ASSUMPTIONS) == 4
 # Sim factory
 # ────────────────────────────────────────────────────────────────────
 def build_scenario_sim(seed, scenario_id, assumption_id, draw_row,
-                       start=1985, stop=2045, n_agents=10_000):
+                       start=1985, stop=2045, n_agents=10_000,
+                       bundled_prevention=False):
     """
     Compose a runnable sim from a cell spec + assumption + calibration draw.
 
@@ -132,6 +133,20 @@ def build_scenario_sim(seed, scenario_id, assumption_id, draw_row,
     # sti.Sim(**parts) deep-copies modules on construction.
     anc_screens = _build_anc_screens(cell)
     parts['interventions'] = list(parts['interventions']) + anc_screens
+    if bundled_prevention and anc_screens:
+        from interventions import DxRiskRedux
+        import starsim as ss
+        parts['interventions'].append(DxRiskRedux(
+            name='anc_bundled_prevention',
+            triggers=('anc_enroll', 'anc_tri3'),
+            trigger_attr='ti_tested',
+            diseases=('ng', 'ct', 'tv'),
+            start=2028,
+            coverage=ss.bernoulli(p=1.0),
+            eff=0.9,
+            dur=ss.constant(ss.months(3)),
+        ))
+
     parts['analyzers'] = list(parts['analyzers']) + [birth_outcome_dalys(start=start)]
 
     sim = sti.Sim(**parts)
