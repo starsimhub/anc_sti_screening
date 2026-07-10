@@ -560,3 +560,99 @@ class CareTimingAnalyzer(ss.Analyzer):
                 if n_in:
                     self.results[f'{d}_inf_treated_within_{w}mo'][ti] += n_in
         return
+
+
+class birth_outcome_attribution(ss.Analyzer):
+    """
+    Per-disease attribution of adverse birth outcomes.
+
+    PTB and LBW get per-disease attribution across all four covered diseases
+    (NG / CT / TV / syph), including sole vs shared columns. Stillbirth and
+    NND are syph-only (`sti.Syphilis` is the only module that emits them in
+    this model; NG/CT/TV → stillbirth/NND is a known model gap).
+
+    At delivery, reads `sti_fetal.exposed_<disease>[mother]` alongside
+    per-newborn PTB/LBW flags from Pregnancy/FetalHealth and syph-newborn
+    ti_stillborn/ti_nnd, tallying counts against the current ti.
+
+    Rows sum to ≥ n_ABO because a birth with multiple exposures is counted
+    under each contributing disease; the sole/shared columns disambiguate.
+    """
+
+    def __init__(self, diseases=('ng', 'ct', 'tv', 'syph'), start=None, **kwargs):
+        super().__init__(**kwargs)
+        self.name = 'birth_outcome_attribution'
+        self.diseases = list(diseases)
+        self.start = start
+        return
+
+    def init_pre(self, sim):
+        super().init_pre(sim)
+        if self.start is None:
+            self.start = sim.t.yearvec[0]
+        self._sti_fetal = sim.custom.get('sti_fetal') if hasattr(sim, 'custom') else None
+        if self._sti_fetal is None:
+            raise ValueError('birth_outcome_attribution requires sti_fetal in sim.custom.')
+        self._pregnancy = sim.demographics.pregnancy
+        self._fh = sim.custom['fetal_health']
+        self._syph = sim.diseases.get('syph')
+        self._pregnancy.add_delivery_callback(self._on_delivery)
+        return
+
+    def step(self):
+        return
+
+    def init_results(self):
+        super().init_results()
+        results = sc.autolist()
+        for outcome in ('ptb', 'lbw'):
+            for d in self.diseases:
+                results += ss.Result(f'n_{outcome}_{d}', dtype=int, label=f'{outcome.upper()} attributed to {d.upper()}')
+                results += ss.Result(f'n_{outcome}_sole_{d}', dtype=int, label=f'{outcome.upper()} solely {d.upper()}')
+                results += ss.Result(f'n_{outcome}_shared_{d}', dtype=int, label=f'{outcome.upper()} co-attributed with {d.upper()}')
+            results += ss.Result(f'n_{outcome}_no_attribution', dtype=int, label=f'{outcome.upper()} with no STI exposure')
+        results += ss.Result('n_stillbirth_syph', dtype=int, label='Syph-attributable stillbirths')
+        results += ss.Result('n_nnd_syph', dtype=int, label='Syph-attributable neonatal deaths')
+        self.define_results(*results)
+        return
+
+    def _on_delivery(self, mother_uids, newborn_uids):
+        if self.sim.t.yearvec[self.ti] < self.start:
+            return
+        if not len(newborn_uids):
+            return
+        ti = self.ti
+
+        is_ptb = self._pregnancy.preterm[newborn_uids]
+        is_lbw = self._fh.lbw[newborn_uids]
+        if self._syph is not None:
+            cs = self._syph.cs_outcome[newborn_uids]
+            is_syph_stillborn = cs == 2
+            is_syph_nnd = cs == 1
+        else:
+            is_syph_stillborn = np.zeros(len(newborn_uids), dtype=bool)
+            is_syph_nnd = np.zeros(len(newborn_uids), dtype=bool)
+
+        parents = self.sim.people.parent[newborn_uids]
+        exposure = {}
+        for d in self.diseases:
+            arr = getattr(self._sti_fetal, f'exposed_{d}', None)
+            exposure[d] = arr[parents] if arr is not None else np.zeros(len(newborn_uids), dtype=bool)
+        n_exposures = np.sum(list(exposure.values()), axis=0)
+
+        for outcome_name, outcome_mask in (('ptb', is_ptb), ('lbw', is_lbw)):
+            for d in self.diseases:
+                mask_d = exposure[d]
+                self.results[f'n_{outcome_name}_{d}'][ti] += int((outcome_mask & mask_d).sum())
+                self.results[f'n_{outcome_name}_sole_{d}'][ti] += int((outcome_mask & mask_d & (n_exposures == 1)).sum())
+                self.results[f'n_{outcome_name}_shared_{d}'][ti] += int((outcome_mask & mask_d & (n_exposures > 1)).sum())
+            self.results[f'n_{outcome_name}_no_attribution'][ti] += int((outcome_mask & (n_exposures == 0)).sum())
+
+        self.results['n_stillbirth_syph'][ti] += int(is_syph_stillborn.sum())
+        self.results['n_nnd_syph'][ti] += int(is_syph_nnd.sum())
+
+        for d in self.diseases:
+            arr = getattr(self._sti_fetal, f'exposed_{d}', None)
+            if arr is not None:
+                arr[mother_uids] = False
+        return

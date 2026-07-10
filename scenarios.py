@@ -110,7 +110,7 @@ def build_scenario_sim(seed, scenario_id, assumption_id, draw_row,
     from model import make_sim_parts
     from apply_draw import row_to_sim_pars, set_pars_local
     from interventions import ANC_PROBS_REALISTIC
-    from analyzers import birth_outcome_dalys
+    from analyzers import birth_outcome_dalys, birth_outcome_attribution
 
     cell = INTERVENTION_SCENARIOS[scenario_id]
     assumption = EFFECT_SIZE_ASSUMPTIONS[assumption_id]
@@ -147,7 +147,10 @@ def build_scenario_sim(seed, scenario_id, assumption_id, draw_row,
             dur=ss.constant(ss.months(3)),
         ))
 
-    parts['analyzers'] = list(parts['analyzers']) + [birth_outcome_dalys(start=start)]
+    parts['analyzers'] = list(parts['analyzers']) + [
+        birth_outcome_dalys(start=start),
+        birth_outcome_attribution(start=start),
+    ]
 
     sim = sti.Sim(**parts)
 
