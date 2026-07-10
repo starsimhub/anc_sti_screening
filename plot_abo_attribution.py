@@ -1,26 +1,27 @@
 """
-ABO attribution figure — 4 panels (PTB, LBW, Stillbirth, NND).
+ABO attribution figure — 4 outcome panels; each panel shows the
+3 scenarios × 4 assumption regimes grid.
 
-PTB/LBW stacks (mutually exclusive, sum to total outcome count):
+PTB/LBW stacks (mutually exclusive, sum to n_outcome):
   sole_syph | sole_ct | sole_tv | sole_ng | shared_across_STIs | no_STI_attribution
 
-"Sole" = only this STI exposed the pregnancy. "Shared" = pregnancy exposed
-to 2+ STIs (we don't split it further because a shared PTB with NG+CT
-can't be uniquely attributed to either).
+Stillbirth/NND: syph-only (single bar per row).
 
-Stillbirth/NND: syph-only (model gap: NG/CT/TV don't produce them).
+Rows grouped by assumption regime; within each regime the 3 scenarios
+(SOC, 1-screen 90%, 2-screen 90%) appear as sub-rows. This layout makes
+regime-to-regime comparison the primary read while still showing
+per-scenario impact within each regime.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 
 
 REPO = Path(__file__).resolve().parent
-DISEASES = ('syph', 'ct', 'tv', 'ng')  # display order
+DISEASES = ('syph', 'ct', 'tv', 'ng')
 DISEASE_COLORS = {
     'syph':   '#4e79a7',
     'ct':     '#f28e2b',
@@ -37,82 +38,116 @@ LABELS = {
     'shared': 'Shared (2+ STIs)',
     'none':   'No STI attribution',
 }
-SCENARIO_LABELS = {
-    'soc':                'SOC (syph RPR only)',
-    'anc_1screen_90cov':  '1-screen (enrolment) 90%',
-    'anc_2screen_90cov':  '2-screen (enrolment + 3rd tri) 90%',
+SCENARIO_SHORT = {
+    'soc':                'SOC',
+    'anc_1screen_90cov':  '1-screen 90%',
+    'anc_2screen_90cov':  '2-screen 90%',
 }
+REGIME_LABEL = {
+    'no_treatment_effect': 'No treatment effect',
+    'weak_effects':        'Weak effects',
+    'central_reversible':  'Central + reversible',
+    'strong_effects':      'Strong effects',
+}
+# regime display order (worst → best assumption for interventions)
+REGIME_ORDER = ['no_treatment_effect', 'weak_effects', 'central_reversible', 'strong_effects']
+SCENARIO_ORDER = ['soc', 'anc_1screen_90cov', 'anc_2screen_90cov']
 
 
-def _panel_ptb_lbw(ax, df_attrib, df_totals, outcome, scenarios, title):
+def _row_label(regime, scenario, show_regime):
+    scen = SCENARIO_SHORT[scenario]
+    return f'{REGIME_LABEL[regime]}\n{scen}' if show_regime else f'  {scen}'
+
+
+def _panel_ptb_lbw(ax, attrib, totals, outcome, title):
     ax.set_title(title, fontsize=11)
-    y = np.arange(len(scenarios))
-    n_total_col = f'n_{outcome}'
+    y = 0
+    tick_pos, tick_labels = [], []
 
-    for i, sc in enumerate(scenarios):
-        sub = df_attrib[(df_attrib.scenario == sc) & (df_attrib.outcome == outcome)]
-        sole = {d: int(sub[sub.disease == d].n_sole.iloc[0]) for d in DISEASES}
-        no_attrib = int(sub[sub.disease == 'none'].n_total.iloc[0])
-        n_total = int(df_totals.loc[sc, n_total_col])
-        shared = max(0, n_total - sum(sole.values()) - no_attrib)
+    for r_i, regime in enumerate(REGIME_ORDER):
+        for s_i, sc in enumerate(SCENARIO_ORDER):
+            sub = attrib[(attrib.scenario == sc) & (attrib.assumption == regime) & (attrib.outcome == outcome)]
+            if sub.empty:
+                y += 1
+                continue
+            sole = {d: int(sub[sub.disease == d].n_sole.median()) for d in DISEASES}
+            no_attrib = int(sub[sub.disease == 'none'].n_total.median())
+            n_total_row = totals[(totals.scenario == sc) & (totals.assumption == regime)]
+            n_total = int(n_total_row[f'n_{outcome}'].median()) if not n_total_row.empty else 0
+            shared = max(0, n_total - sum(sole.values()) - no_attrib)
 
-        left = 0.0
-        for d in DISEASES:
-            v = sole[d]
-            if v:
-                ax.barh(i, v, left=left, color=DISEASE_COLORS[d], edgecolor='white',
-                        linewidth=0.5, label=LABELS[d] if i == 0 else None)
-                left += v
-        if shared:
-            ax.barh(i, shared, left=left, color=DISEASE_COLORS['shared'], edgecolor='white',
-                    linewidth=0.5, label=LABELS['shared'] if i == 0 else None)
-            left += shared
-        if no_attrib:
-            ax.barh(i, no_attrib, left=left, color=DISEASE_COLORS['none'], edgecolor='white',
-                    linewidth=0.5, label=LABELS['none'] if i == 0 else None)
+            left = 0.0
+            for d in DISEASES:
+                v = sole[d]
+                if v:
+                    ax.barh(y, v, left=left, color=DISEASE_COLORS[d], edgecolor='white',
+                            linewidth=0.5,
+                            label=LABELS[d] if (r_i == 0 and s_i == 0) else None)
+                    left += v
+            if shared:
+                ax.barh(y, shared, left=left, color=DISEASE_COLORS['shared'], edgecolor='white',
+                        linewidth=0.5, label=LABELS['shared'] if (r_i == 0 and s_i == 0) else None)
+                left += shared
+            if no_attrib:
+                ax.barh(y, no_attrib, left=left, color=DISEASE_COLORS['none'], edgecolor='white',
+                        linewidth=0.5, label=LABELS['none'] if (r_i == 0 and s_i == 0) else None)
 
-        ax.text(n_total * 1.01, i, f'{n_total/1e6:.2f}M', va='center', fontsize=9)
+            if n_total > 0:
+                ax.text(n_total * 1.01, y, f'{n_total/1e6:.2f}M' if n_total > 1e6 else f'{n_total/1e3:.0f}K',
+                        va='center', fontsize=8)
 
-    ax.set_yticks(y)
-    ax.set_yticklabels([SCENARIO_LABELS[s] for s in scenarios])
+            tick_pos.append(y)
+            tick_labels.append(_row_label(regime, sc, show_regime=(s_i == 0)))
+            y += 1
+        y += 0.5  # separator between regimes
+
+    ax.set_yticks(tick_pos)
+    ax.set_yticklabels(tick_labels, fontsize=8)
     ax.invert_yaxis()
     ax.grid(True, axis='x', alpha=0.3)
     ax.set_xlabel('Count (cumulative 2028-2045, population scale)')
 
 
-def _panel_syph_only(ax, df_attrib, scenarios, outcome, title):
+def _panel_syph_only(ax, attrib, outcome, title):
     ax.set_title(title, fontsize=11)
-    y = np.arange(len(scenarios))
-    for i, sc in enumerate(scenarios):
-        row = df_attrib[(df_attrib.scenario == sc) & (df_attrib.outcome == outcome)]
-        n = int(row.n_total.iloc[0]) if not row.empty else 0
-        ax.barh(i, n, color=DISEASE_COLORS['syph'], edgecolor='white', linewidth=0.5)
-        ax.text(n * 1.01, i, f'{n:,}', va='center', fontsize=9)
-    ax.set_yticks(y)
-    ax.set_yticklabels([SCENARIO_LABELS[s] for s in scenarios])
+    y = 0
+    tick_pos, tick_labels = [], []
+
+    for r_i, regime in enumerate(REGIME_ORDER):
+        for s_i, sc in enumerate(SCENARIO_ORDER):
+            row = attrib[(attrib.scenario == sc) & (attrib.assumption == regime) & (attrib.outcome == outcome)]
+            n = int(row.n_total.median()) if not row.empty else 0
+            ax.barh(y, n, color=DISEASE_COLORS['syph'], edgecolor='white', linewidth=0.5)
+            if n > 0:
+                ax.text(n * 1.01, y, f'{n:,}', va='center', fontsize=8)
+            tick_pos.append(y)
+            tick_labels.append(_row_label(regime, sc, show_regime=(s_i == 0)))
+            y += 1
+        y += 0.5
+
+    ax.set_yticks(tick_pos)
+    ax.set_yticklabels(tick_labels, fontsize=8)
     ax.invert_yaxis()
     ax.grid(True, axis='x', alpha=0.3)
     ax.set_xlabel('Count (cumulative 2028-2045, population scale)')
 
 
 def main():
-    df_attrib = pd.read_csv(REPO / 'results' / 'abo_attribution.csv')
-    df_totals = pd.read_csv(REPO / 'results' / 'abo_totals.csv').set_index('scenario')
-    scenarios = list(SCENARIO_LABELS.keys())
+    attrib = pd.read_csv(REPO / 'results' / 'abo_attribution.csv')
+    totals = pd.read_csv(REPO / 'results' / 'abo_totals.csv')
 
-    fig, axes = plt.subplots(2, 2, figsize=(15, 8), constrained_layout=True)
-    _panel_ptb_lbw(axes[0, 0], df_attrib, df_totals, 'ptb', scenarios, 'Preterm birth (PTB)')
-    _panel_ptb_lbw(axes[0, 1], df_attrib, df_totals, 'lbw', scenarios, 'Low birth weight (LBW)')
-    _panel_syph_only(axes[1, 0], df_attrib, scenarios, 'stillbirth',
+    fig, axes = plt.subplots(2, 2, figsize=(18, 12), constrained_layout=True)
+    _panel_ptb_lbw(axes[0, 0], attrib, totals, 'ptb', 'Preterm birth (PTB)')
+    _panel_ptb_lbw(axes[0, 1], attrib, totals, 'lbw', 'Low birth weight (LBW)')
+    _panel_syph_only(axes[1, 0], attrib, 'stillbirth',
                      'Stillbirth (syph-attributable — NG/CT/TV pathway not modelled)')
-    _panel_syph_only(axes[1, 1], df_attrib, scenarios, 'nnd',
+    _panel_syph_only(axes[1, 1], attrib, 'nnd',
                      'Neonatal death (syph-attributable — NG/CT/TV pathway not modelled)')
 
     handles, labels = axes[0, 0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc='lower center', ncol=6, bbox_to_anchor=(0.5, -0.03))
-    fig.suptitle('Attributable adverse birth outcomes by scenario '
-                 '(central_reversible, 1 draw × 1 seed, 2028-2045)',
-                 fontsize=13)
+    fig.legend(handles, labels, loc='lower center', ncol=6, bbox_to_anchor=(0.5, -0.02))
+    fig.suptitle('Attributable adverse birth outcomes: 3 scenarios × 4 effect-size regimes '
+                 '(cumulative 2028-2045)', fontsize=13)
 
     (REPO / 'figures').mkdir(exist_ok=True)
     outpath = REPO / 'figures' / 'abo_attribution.png'
