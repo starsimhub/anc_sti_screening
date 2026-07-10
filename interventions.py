@@ -2,7 +2,7 @@
 Interventions for the ANC STI screening model.
 
 Ported from sti_notification's interventions.py: make_testing, make_syph_testing,
-SyphilisANCTimer, FSWOutreach, CareSeekScaler, and module-level constants.
+SyphilisANCTimer, CareSeekScaler, and module-level constants.
 PN classes (SyndromicPN, POCPN, PNIntensitySwitch) excluded; partner notification
 is out of scope for this project's first run. ANCScreen is a project-specific
 addition. DxRiskRedux unifies the old CondomCounseling (treatment-triggered)
@@ -557,48 +557,6 @@ def make_pn(poc=None, pn_pars=None):
     return pn
 
 
-class FSWOutreach(sti.SymptomaticTesting):
-    """Periodic NG/CT/TV testing of currently-active FSW.
-
-    Models the proactive sex-worker outreach programs (DREAMS, Sista2Sista,
-    SAPPHIRE clinics in Zimbabwe) that test FSW for STIs on a fixed
-    cadence regardless of symptoms. Reuses :class:`sti.SymptomaticTesting`
-    internals: per-step bernoulli over ``structuredsexual.fsw.uids``,
-    per-pathogen sens/spec, positives enqueued onto ng_tx / ct_tx /
-    metronidazole. Positives also drop into the PN index pool (via the
-    standard ``tx.ti_treated == ti`` semantics on the next treatment step).
-
-    The asymptomatic FSW reservoir is the structural bottleneck PN cannot
-    reach (a client picks up NG from a FSW, may be asymptomatic or
-    delayed-symptomatic, and even if he later seeks care he typically
-    cannot or will not name the FSW for PN). Direct outreach is the only
-    realistic way to break that chain.
-
-    Args:
-        coverage_per_step (float): per-step probability an active FSW
-            gets screened. 0.10 ≈ ~70% annual reach at monthly dt.
-        start (year): outreach begins. Default 2027 (intv_year).
-        stop (year): outreach ends. Default 2040.
-        diseases, treatments, disease_treatment_map: forwarded to
-            :class:`sti.SymptomaticTesting`.
-    """
-    def __init__(self, coverage_per_step=0.10, **kwargs):
-        # FSW outreach uses its own eligibility filter (active FSW only).
-        super().__init__(eligibility=self._fsw_eligibility, **kwargs)
-        # Per-agent bernoulli — converted via update_pars so it's CRN-safe
-        # and gets registered with the sim.
-        self.define_pars(
-            coverage=ss.bernoulli(p=coverage_per_step),
-        )
-
-    def _fsw_eligibility(self, sim):
-        """Currently-active FSW only, with per-step bernoulli."""
-        fsw = sim.networks.structuredsexual.fsw.uids
-        if len(fsw) == 0:
-            return ss.uids()
-        return self.pars.coverage.filter(fsw)
-
-
 SYNDROMIC_TX_MIX_CERV = dict(
     all3=[0.50, 0.10],
     ngct=[0.20, 0.80],
@@ -611,15 +569,13 @@ SYNDROMIC_TX_MIX_NONCERV = dict(
     mtnz=[0.25, 0.00],
     none=[0.25, 0.10],
 )
-# POC etiological-test accuracy used for the symptomatic-testing panel
-# and for FSW outreach. sti.SymptomaticTesting expects
-# {disease: [F, M]} dicts.
+# POC etiological-test accuracy used for the symptomatic-testing panel.
+# sti.SymptomaticTesting expects {disease: [F, M]} dicts.
 POC_SENS = {'ng': [0.95, 0.95], 'ct': [0.95, 0.95], 'tv': [0.95, 0.95]}
 POC_SPEC = {'ng': [0.95, 0.95], 'ct': [0.95, 0.95], 'tv': [0.95, 0.95]}
 
 
-def make_testing(poc=None, stop=2040, fsw_outreach=False,
-                 fsw_coverage_per_step=0.10):
+def make_testing(poc=None, stop=2040):
 
     intv_year = 2027
 
@@ -734,27 +690,6 @@ def make_testing(poc=None, stop=2040, fsw_outreach=False,
             pars=dict(sens=POC_SENS, spec=POC_SPEC),
         )
         intvs.append(panel)
-
-    if fsw_outreach:
-        # Direct FSW outreach: per-step bernoulli over active FSW.
-        # Tests each sampled FSW for NG/CT/TV (same POC panel internals)
-        # and enqueues positives onto the same treatments. Requires
-        # poc=True semantically — the treatments must exist as-is.
-        if not poc:
-            raise ValueError("fsw_outreach=True requires poc=True (uses "
-                             "POC treatment routing).")
-        disease_treatment_map = {'ng': ng_tx, 'ct': ct_tx, 'tv': metronidazole}
-        fsw_intv = FSWOutreach(
-            coverage_per_step=fsw_coverage_per_step,
-            name='fsw_outreach', label='fsw_outreach',
-            start=intv_year, stop=stop,
-            diseases=['ng', 'ct', 'tv'],
-            treatments=treatments,
-            disease_treatment_map=disease_treatment_map,
-            negative_treatments=[],
-            pars=dict(sens=POC_SENS, spec=POC_SPEC),
-        )
-        intvs.append(fsw_intv)
 
     # PN intervention is built separately by make_pn() and appended at
     # the top level (make_interventions). That keeps the asymmetry

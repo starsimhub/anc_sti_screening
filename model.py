@@ -146,8 +146,7 @@ def make_networks(dur_recall=ss.years(0.25)):
 
 def make_interventions(diseases, which='all', poc=None, poc_syph=None,
                        pn_pars=None, stop=2040,
-                       syph_symp_test_prob=None, syph_anc_probs=None,
-                       fsw_outreach=False, fsw_coverage_per_step=0.10):
+                       syph_symp_test_prob=None, syph_anc_probs=None):
     """Orchestrate intervention construction.
 
     Layout (top to bottom in the returned list):
@@ -170,9 +169,7 @@ def make_interventions(diseases, which='all', poc=None, poc_syph=None,
         poc_syph = poc
     intvs = make_hiv_intvs()
     if which in ('discharging', 'all'):
-        intvs += make_testing(poc=poc, stop=stop,
-                              fsw_outreach=fsw_outreach,
-                              fsw_coverage_per_step=fsw_coverage_per_step)
+        intvs += make_testing(poc=poc, stop=stop)
     # Insert PN AFTER make_testing but BEFORE make_syph_testing. This
     # order matters: POCPN.notify_attendees fires syph_pn_test.step on
     # attending partners, which sets ti_positive. syph_tx (last
@@ -201,8 +198,7 @@ def make_sim_parts(seed=1, n_agents=5e3, start=1985, stop=2030,
                    pn_pars=None, poc=None, poc_syph=None, which='all',
                    dur_recall=ss.years(0.25),
                    fetal_health=True, care_seek_mult=1.0, verbose=1/12,
-                   syph_symp_test_prob=None, syph_anc_probs=None,
-                   fsw_outreach=False, fsw_coverage_per_step=0.10):
+                   syph_symp_test_prob=None, syph_anc_probs=None):
     """Return a dict of Sim kwargs ready for sti.Sim(**parts).
 
     Callers can inspect or mutate the returned dict before constructing
@@ -226,9 +222,7 @@ def make_sim_parts(seed=1, n_agents=5e3, start=1985, stop=2030,
                                        poc_syph=poc_syph,
                                        pn_pars=pn_pars, stop=stop,
                                        syph_symp_test_prob=syph_symp_test_prob,
-                                       syph_anc_probs=syph_anc_probs,
-                                       fsw_outreach=fsw_outreach,
-                                       fsw_coverage_per_step=fsw_coverage_per_step)
+                                       syph_anc_probs=syph_anc_probs)
 
     # FetalHealth tracks adverse birth outcomes (LBW, SGA, SVN, timing); the
     # sti_fetal connector translates STI infections + treatments into
