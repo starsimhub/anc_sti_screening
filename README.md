@@ -92,12 +92,19 @@ Fast smoke test:
 python quick_validate.py    # 3 scenarios, K=1 seed, ~15 min
 ```
 
-Single-seed SOC diagnostic (syph-in-pregnancy detection cascade):
+Syph-in-pregnancy MTCT diagnostic (hot-seed SOC, pooled two seeds):
 
 ```bash
-python diag_syph_hunt.py            # find a hot syph seed
-python diag_syph_k5.py              # K=5 instrumented SOC 1985-2045
-python plot_syph_diagnostic.py 2020 2025 343000,343003   # 3-panel figure
+# Run each hot seed with PregnancyLog attached (pickles ~5 MB each,
+# ~8-10 min wall each; results/*.pkl is gitignored).
+python diag_syph_preg.py --seed 343000 --stop 2045 --out results/syph_preg_log_343000.pkl
+python diag_syph_preg.py --seed 343003 --stop 2045 --out results/syph_preg_log_343003.pkl
+
+# Cascade + TREATED / UNTREATED stage×outcome heatmaps, Zim-scaled events/yr.
+python syph_mtct_outcomes.py 2000 2045
+
+# Point-in-time syph stage distribution (adult women + pregnant women).
+python snapshot_syph_stages.py --year 2025
 ```
 
 ## Dependencies

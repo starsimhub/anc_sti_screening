@@ -46,7 +46,7 @@ def make_ulcerative_stis():
     init_prev_latent_path = f'{DATA_DIR}/init_prev_latent_syph.csv'
     syph = sti.Syphilis(
         beta_m2f=0.15,
-        beta_m2c=0.075,
+        beta_m2c=0.9,   # raised from 0.075 so MTCT fires reliably during pregnancy
         eff_condom=0.5,
         rel_trans_primary=5,
         rel_trans_secondary=1,

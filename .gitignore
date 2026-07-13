@@ -14,9 +14,9 @@ results/*.parquet
 results/scenarios.jsonl
 
 # Figures (regenerable)
-figures/*.png
-figures/*.pdf
-figures/*.svg
+figures/**/*.png
+figures/**/*.pdf
+figures/**/*.svg
 
 # IDE
 .idea/

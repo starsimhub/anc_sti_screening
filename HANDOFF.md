@@ -18,10 +18,8 @@ Any handover-analysis or narrative-writing steps should confront these caveats b
 
 - **700-sim grid complete.** 5 draws × 5 seeds × 7 scenarios × 4 assumptions = 700 sims. Wall time 15,403s (4h 17m) on 80 workers. Zero errors. Output: `results/scenarios.jsonl` (700 rows, gitignored) and `results/scenarios.kavg.csv` (140 rows, committed).
 - **SyphilisANCTimer floor-fix committed** (`a4b7522`). Pre-fix, ANC syph testing fired ~99% below expected (fractional-ti vs integer-`self.ti` equality mismatch). Post-fix, ANC RDT fires ~2M pop-scaled tests/2020–2025 in SOC, matching ~70% per-pregnancy coverage from `ANC_PROBS_REALISTIC`.
-- **Syph-in-pregnancy diagnostic** for SOC over three time windows rendered (K=2 hot-seed avg from a K=5 SOC-only sim):
-  - `figures/syph_pregnancy_diagnostic_2012_2020_hot.png`
-  - `figures/syph_pregnancy_diagnostic_2020_2025_hot.png`
-  - `figures/syph_pregnancy_diagnostic_2025_2045_hot.png`
+- **Syph-in-pregnancy MTCT-outcomes diagnostic** — clean rewrite in `syph_preg_analyzer.py` (`PregnancyLog` starsim analyzer) + `diag_syph_preg.py` driver + `syph_mtct_outcomes.py` plot. Also `snapshot_syph_stages.py` for point-in-time stage distribution among adult women / pregnant women. Pooled 2 hot seeds (343000, 343003), figure at `figures/syph_pregnancy_2000_2045_hot_tx_vs_untx.png` (cascade + TREATED vs UNTREATED heatmaps at Zim scale). Earlier one-off diagnostics (`diag_syph_hunt.py`, `diag_syph_k5.py`, `plot_syph_diagnostic.py`) were deleted; old figure variants moved to `figures/archive/`.
+- **`beta_m2c` raised from 0.075 → 0.9** in `model.py` (2026-07-13). Original 0.075 produced ~7% MTCT-fired-per-syph+-pregnancy despite arithmetic predicting ~49% (per-step p=0.0723 × 9 monthly steps). The ~6× deficit was structural, not stage-mix — see the diagnostic below. Raising to 0.9 gets observed MTCT to ~15% per syph+ pregnancy, still ~4× below the arithmetic ceiling of ~99.97%. Whatever residual throttle exists (`rel_sus[fetus]` handling, `MaternalNet` edge coverage, `to_prob(dt)` conversion?) has NOT been diagnosed; the change is a workaround, not a root-cause fix.
 
 ## 700-sim headline (median across 5 draws, K=5 seed-averaged)
 
@@ -85,25 +83,22 @@ c79ad52 feat: SyphilisANCTimer schedules one visit per pregnancy per configured 
 f7f1b27 feat(connectors): sti_fetal records per-pregnancy exposure per disease
 ```
 
-## Uncommitted work (2026-07-13, needs curation)
+## MTCT diagnostic — key findings (2026-07-13)
 
-**Diagnostic scripts** — all one-shot instrumentation used during the SyphilisANCTimer investigation:
-- `diag_syph_k5.py` — main K=5 SOC instrumentation with loop.insert. **Recommend commit** (reference for future diagnostics).
-- `plot_syph_diagnostic.py` — 3-panel figure generator, CLI arg for window. **Recommend commit**.
-- `diag_syph_hunt.py` — hot-seed hunt. **Recommend commit** (small, useful helper).
-- `diag_syph_pregnancy.py` — earlier single-sim variant, superseded by k5. **Recommend drop**.
-- `diag_syph_reanalyse.py` — one-off pickle re-analysis. **Recommend drop**.
-- `diag_2screen.py`, `diag_test_sources.py`, `diag_timer.py` — one-off debug scripts used to locate the fractional-ti bug. **Recommend drop** (bug is now documented in memory; scripts add clutter).
+Cascade under SOC, 2000-2045, 2 hot seeds, 1728 syph+ pregnancies:
+- 62% of syph+ pregnancies get any syph test during pregnancy (ANC RPR + symptomatic + PN combined)
+- 51% diagnosed → 51% treated → 50% treated with normal outcome (1% treated but still adverse)
+- Balance: 50.6% treated / 49.4% untreated syph+ pregnancies
 
-**Modified files**:
-- `results/abo_attribution.csv`, `results/abo_totals.csv` — pre-fix outputs from `abo_smoke.py`. Small (~50 KB total). May want to REGENERATE post-fix before committing, or discard.
+Stage×outcome heatmaps (pooled 2 seeds, at Zim scale):
+- **Late latent (untreated)**: 65% normal, matches stisim's built-in table (80%) reasonably.
+- **Primary (untreated)**: 40% normal / 60% adverse — matches stisim's mat_active table (25% normal).
+- **Treated** across all stages: 65-75% normal — treatment cancels most `ti_{outcome}` events, as designed.
+- **Aggregate adverse-per-MTCT**: untreated ~40%, treated ~30%.
 
-**Untracked results/**:
-- `results/diag_k5_soc.pkl` (17 MB) — K=5 SOC per-pregnancy records. **Gitignored via new `*.pkl` rule.**
-- `results/diag_records.pkl` (580 KB) — single-sim records, superseded. Gitignored.
-- `results/scenarios.jsonl` (276 KB) — 700-sim raw output. Gitignored (regenerable).
-- `results/scenarios.kavg.csv` (28 KB) — K-averaged summary of the 700 sims. **Recommend commit** (small, useful, matches the parent-repo pattern).
-- `results/hot_seed.txt` (33 B) — trivial marker file, seed=343000. **Recommend drop** or commit for reproducibility.
+Point-in-time stage distribution (year 2025, hot seed 343000):
+- Adult women 15-49 (n=5897, syph prev 9.3%): 1.5% early latent, 6.7% late latent of the population; 16.5%/72.7% of infected.
+- Pregnant women (n=502, syph prev 5.4%): 1.4% early latent, 2.4% late latent of the population; 25.9%/44.4% of infected. ANC RPR draws down the late-latent pool in pregnant women vs general.
 
 ## Suggested next steps for the next agent
 

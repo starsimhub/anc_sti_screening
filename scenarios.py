@@ -97,7 +97,7 @@ assert len(EFFECT_SIZE_ASSUMPTIONS) == 4
 # ────────────────────────────────────────────────────────────────────
 def build_scenario_sim(seed, scenario_id, assumption_id, draw_row,
                        start=1985, stop=2045, n_agents=10_000,
-                       bundled_prevention=False):
+                       bundled_prevention=False, extra_analyzers=None):
     """
     Compose a runnable sim from a cell spec + assumption + calibration draw.
 
@@ -159,6 +159,8 @@ def build_scenario_sim(seed, scenario_id, assumption_id, draw_row,
         birth_outcome_dalys(start=start),
         birth_outcome_attribution(start=start),
     ]
+    if extra_analyzers:
+        parts['analyzers'] = list(parts['analyzers']) + list(extra_analyzers)
 
     sim = sti.Sim(**parts)
 
