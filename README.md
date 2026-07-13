@@ -4,7 +4,7 @@ Agent-based model for evaluating antenatal care (ANC) screening strategies for a
 
 Calibration + intervention infrastructure is ported from the sibling repo `sti_notification`. This project uses the ported calibrated ensemble; it does NOT re-run the calibration itself. Current work is on branch `port/stinotif-calibration`.
 
-**Read `HANDOFF.md` first** for current state, small-N findings, and the pending pivot to ABO/APO-first reporting.
+**Read `HANDOFF.md` first.** As of 2026-07-13 the 700-sim full grid has completed but the user is not yet convinced by the numbers. Known model/analyzer issues (prenatal stillbirth counter, stochastic extinction, congenital-outcome semantics) are documented there — approach with skepticism before writing anything up.
 
 ## Diseases modeled
 - HIV
@@ -80,14 +80,24 @@ sim.run()
 Run the full grid (5 draws × 5 seeds × 7 scenarios × 4 assumptions = 700 sims):
 
 ```bash
-python run_scenarios.py    # writes results/scenarios.jsonl
-python aggregate_scenarios.py    # writes results/scenarios.kavg.csv (+ parquets)
+python run_scenarios.py    # writes results/scenarios.jsonl (~5 MB, gitignored)
+python aggregate_scenarios.py    # writes results/scenarios.kavg.csv (committed, 28 KB)
 ```
+
+Wall time ~4.3h on 80 VM workers. Timeseries/snapshot parquets from Task 5.2 of the plan doc are NOT yet emitted by `run_scenarios.py`; extending it would require a rerun.
 
 Fast smoke test:
 
 ```bash
 python quick_validate.py    # 3 scenarios, K=1 seed, ~15 min
+```
+
+Single-seed SOC diagnostic (syph-in-pregnancy detection cascade):
+
+```bash
+python diag_syph_hunt.py            # find a hot syph seed
+python diag_syph_k5.py              # K=5 instrumented SOC 1985-2045
+python plot_syph_diagnostic.py 2020 2025 343000,343003   # 3-panel figure
 ```
 
 ## Dependencies
