@@ -52,7 +52,7 @@ class SyphilisANCTimer(ss.Intervention):
             dist = getattr(self.pars, f'visit_week_{k}')
             weeks = dist.rvs(uids)
             arr = getattr(self, f'ti_visit_{k}')
-            arr[uids] = preg.ti_pregnant[uids] + weeks
+            arr[uids] = np.floor(preg.ti_pregnant[uids] + weeks)
 
     def init_post(self):
         super().init_post()
