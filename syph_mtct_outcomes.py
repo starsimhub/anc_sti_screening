@@ -67,8 +67,8 @@ cascade = [
 cascade_pct = [100 * c[1] / n_syph for c in cascade]
 
 # --- Heatmaps ---
-STAGES = ['primary', 'secondary', 'early', 'late']
-STAGE_LABEL = {'primary': 'Primary', 'secondary': 'Secondary',
+STAGES = ['mat_active', 'early', 'late']
+STAGE_LABEL = {'mat_active': 'Active\n(exp/primary/secondary)',
                'early': 'Early latent', 'late': 'Late latent'}
 OUTCOMES = [1, 2, 3, 4]
 OUTCOME_LABEL = {1: 'NND', 2: 'Stillborn', 3: 'Congenital', 4: 'Normal'}
