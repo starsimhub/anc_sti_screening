@@ -1,11 +1,9 @@
 """
-ABO attribution figure — 4 outcome panels; each panel shows the
+ABO attribution figure — PTB and LBW panels; each panel shows the
 3 scenarios × 4 assumption regimes grid.
 
 PTB/LBW stacks (mutually exclusive, sum to n_outcome):
   sole_syph | sole_ct | sole_tv | sole_ng | shared_across_STIs | no_STI_attribution
-
-Stillbirth/NND: syph-only (single bar per row).
 
 Rows grouped by assumption regime; within each regime the 3 scenarios
 (SOC, 1-screen 90%, 2-screen 90%) appear as sub-rows. This layout makes
@@ -108,44 +106,16 @@ def _panel_ptb_lbw(ax, attrib, totals, outcome, title):
     ax.set_xlabel('Count (cumulative 2028-2045, population scale)')
 
 
-def _panel_syph_only(ax, attrib, outcome, title):
-    ax.set_title(title, fontsize=11)
-    y = 0
-    tick_pos, tick_labels = [], []
-
-    for r_i, regime in enumerate(REGIME_ORDER):
-        for s_i, sc in enumerate(SCENARIO_ORDER):
-            row = attrib[(attrib.scenario == sc) & (attrib.assumption == regime) & (attrib.outcome == outcome)]
-            n = int(row.n_total.median()) if not row.empty else 0
-            ax.barh(y, n, color=DISEASE_COLORS['syph'], edgecolor='white', linewidth=0.5)
-            if n > 0:
-                ax.text(n * 1.01, y, f'{n:,}', va='center', fontsize=8)
-            tick_pos.append(y)
-            tick_labels.append(_row_label(regime, sc, show_regime=(s_i == 0)))
-            y += 1
-        y += 0.5
-
-    ax.set_yticks(tick_pos)
-    ax.set_yticklabels(tick_labels, fontsize=8)
-    ax.invert_yaxis()
-    ax.grid(True, axis='x', alpha=0.3)
-    ax.set_xlabel('Count (cumulative 2028-2045, population scale)')
-
-
 def main():
     attrib = pd.read_csv(REPO / 'results' / 'abo_attribution.csv')
     totals = pd.read_csv(REPO / 'results' / 'abo_totals.csv')
 
-    fig, axes = plt.subplots(2, 2, figsize=(18, 12), constrained_layout=True)
-    _panel_ptb_lbw(axes[0, 0], attrib, totals, 'ptb', 'Preterm birth (PTB)')
-    _panel_ptb_lbw(axes[0, 1], attrib, totals, 'lbw', 'Low birth weight (LBW)')
-    _panel_syph_only(axes[1, 0], attrib, 'stillbirth',
-                     'Stillbirth (syph-attributable — NG/CT/TV pathway not modelled)')
-    _panel_syph_only(axes[1, 1], attrib, 'nnd',
-                     'Neonatal death (syph-attributable — NG/CT/TV pathway not modelled)')
+    fig, axes = plt.subplots(1, 2, figsize=(18, 6), constrained_layout=True)
+    _panel_ptb_lbw(axes[0], attrib, totals, 'ptb', 'Preterm birth (PTB)')
+    _panel_ptb_lbw(axes[1], attrib, totals, 'lbw', 'Low birth weight (LBW)')
 
-    handles, labels = axes[0, 0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc='lower center', ncol=6, bbox_to_anchor=(0.5, -0.02))
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='lower center', ncol=6, bbox_to_anchor=(0.5, -0.05))
     fig.suptitle('Attributable adverse birth outcomes: 3 scenarios × 4 effect-size regimes '
                  '(cumulative 2028-2045)', fontsize=13)
 
