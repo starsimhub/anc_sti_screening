@@ -1,147 +1,129 @@
 """
-Run ANC screening scenarios with calibrated parameters.
+Dispatch the (draw × seed × scenario × assumption) grid.
 
-Compares screening strategies across multiple calibrated parameter sets
-and random seeds. Saves treatment and adverse outcome metrics per scenario.
+Builds a sim via scenarios.build_scenario_sim, runs it,
+extracts scalar summary, writes one JSON row to results/scenarios.jsonl.
+
+Usage:
+    # Small-N validation: 1 draw × 1 seed × 7 scenarios × 4 assumptions = 28 sims
+    N_DRAWS=1 N_SEEDS=1 python run_scenarios.py
+
+    # Full first run: 5 draws × 5 seeds × 7 scenarios × 4 assumptions = 700 sims
+    N_DRAWS=5 N_SEEDS=5 python run_scenarios.py
 """
+from __future__ import annotations
 
-# NumPy threading
+import json
+import multiprocessing as mp
 import os
-os.environ.update(
-    OMP_NUM_THREADS='1',
-    OPENBLAS_NUM_THREADS='1',
-    NUMEXPR_NUM_THREADS='1',
-    MKL_NUM_THREADS='1',
-)
+import sys
+import time
+from pathlib import Path
 
-# %% Imports
 import numpy as np
-import sciris as sc
-import stisim as sti
 import pandas as pd
-from model import make_sim
-from run_msim import load_calib_pars, check_stis_alive
-from utils import scenarios, scenlabels
 
-# Constants
-LOCATION = 'zimbabwe'
-RESULTS_DIR = 'results'
+from scenarios import (INTERVENTION_SCENARIOS, EFFECT_SIZE_ASSUMPTIONS,
+                        build_scenario_sim)
 
 
-def run_scenario(scenario='soc', n_pars=10, seeds_per_par=5, start=1990, stop=2040):
-    """
-    Run a single scenario with multiple calibrated parameter sets and seeds.
+REPO = Path(__file__).resolve().parent
+RESULTS = REPO / 'results'
+RESULTS.mkdir(exist_ok=True)
 
-    Args:
-        scenario (str):      scenario name
-        n_pars (int):        number of calibrated parameter sets
-        seeds_per_par (int): random seeds per parameter set
-        start/stop (int):    simulation time range
-    """
-    pars_df = load_calib_pars()
-    base = make_sim(scenario=scenario, start=start, stop=stop, verbose=-1)
-
-    msim = sti.make_calib_sims(
-        calib_pars=pars_df,
-        sim=base,
-        n_parsets=n_pars,
-        seeds_per_par=seeds_per_par,
-        check_fn=check_stis_alive,
-    )
-
-    return msim.sims
+DRAWS_CSV = REPO / 'data' / 'calibration_draws.csv'
+N_DRAWS   = int(os.environ.get('N_DRAWS', 5))
+N_SEEDS   = int(os.environ.get('N_SEEDS', 5))
+N_WORKERS = int(os.environ.get('N_WORKERS', min(80, mp.cpu_count())))
+START     = int(os.environ.get('START', 1985))
+STOP      = int(os.environ.get('STOP', 2045))
+N_AGENTS  = int(os.environ.get('N_AGENTS', 10_000))
 
 
-def extract_results(sims, scenario):
-    """
-    Extract key results from completed scenario sims.
-
-    Returns a long-format DataFrame with columns:
-        scenario, par_idx, year, metric, value
-    """
-    all_rows = []
-    for sim in sims:
-        par_idx = sim.par_idx
-        yearvec = sim.t.yearvec
-
-        # Disease-level results
-        for dis in ['ng', 'ct', 'tv', 'bv']:
-            for metric in ['new_infections', 'prevalence', 'new_treated']:
-                key = f'{dis}.{metric}'
-                try:
-                    vals = sim.results[dis][metric]
-                    for year, val in zip(yearvec, vals):
-                        all_rows.append(dict(scenario=scenario, par_idx=par_idx,
-                                             year=year, metric=key, value=float(val)))
-                except (KeyError, AttributeError):
-                    pass
-
-        # ANC screening results (if present) — check both screen instances
-        for screen_name in ['anc_enroll', 'anc_tri3']:
-            if screen_name in sim.interventions:
-                anc = sim.results[screen_name]
-                for metric_key in ['n_screened', 'n_positive']:
-                    for year, val in zip(yearvec, anc[metric_key]):
-                        all_rows.append(dict(scenario=scenario, par_idx=par_idx,
-                                             year=year, metric=f'{screen_name}.{metric_key}', value=float(val)))
-                for dis in ['ng', 'ct', 'tv']:
-                    for suffix in ['detected', 'true_pos', 'false_neg']:
-                        mkey = f'n_{dis}_{suffix}'
-                        try:
-                            for year, val in zip(yearvec, anc[mkey]):
-                                all_rows.append(dict(scenario=scenario, par_idx=par_idx,
-                                                     year=year, metric=f'{screen_name}.{mkey}', value=float(val)))
-                        except KeyError:
-                            pass
-
-        # Partner notification results (if present)
-        if 'partner_notif' in sim.interventions:
-            pn = sim.results.partner_notif
-            for metric_key in ['n_index_cases', 'n_partners_found', 'n_partners_treated']:
-                for year, val in zip(yearvec, pn[metric_key]):
-                    all_rows.append(dict(scenario=scenario, par_idx=par_idx,
-                                         year=year, metric=f'pn.{metric_key}', value=float(val)))
-
-        # Pregnancy STI stats (if present)
-        if 'pregnancy_sti_stats' in sim.analyzers:
-            ps = sim.results.pregnancy_sti_stats
-            for mkey in ['n_pregnant', 'n_pregnant_any_sti', 'pregnant_sti_prev']:
-                for year, val in zip(yearvec, ps[mkey]):
-                    all_rows.append(dict(scenario=scenario, par_idx=par_idx,
-                                         year=year, metric=f'preg.{mkey}', value=float(val)))
-            for dis in ['ng', 'ct', 'tv']:
-                for year, val in zip(yearvec, ps[f'pregnant_{dis}_prev']):
-                    all_rows.append(dict(scenario=scenario, par_idx=par_idx,
-                                         year=year, metric=f'preg.{dis}_prev', value=float(val)))
-
-    df = pd.DataFrame(all_rows)
-    return df
+def _endpoint_sum(res, path, field):
+    """Safe endpoint sum: returns nan if path or field missing."""
+    try:
+        cur = res
+        for step in path:
+            cur = cur[step]
+        return float(np.sum(cur[field].values))
+    except (KeyError, AttributeError, TypeError):
+        return float('nan')
 
 
-def save_scenario_results(sims, scenario):
-    """ Extract and save results for a single scenario """
-    df = extract_results(sims, scenario)
-    sc.saveobj(f'{RESULTS_DIR}/scenario_{scenario}.df', df)
-    print(f'Saved {RESULTS_DIR}/scenario_{scenario}.df ({len(df)} rows)')
-    return df
+def extract_scalars(sim, cell_id, assumption_id, draw_idx, seed):
+    """Pull the small scalar summary needed for the JSONL archive."""
+    r = sim.results
+    return {
+        'draw_idx': int(draw_idx),
+        'seed': int(seed),
+        'scenario_id': cell_id,
+        'assumption_id': assumption_id,
+        # ABO
+        'n_deliveries':  _endpoint_sum(r, ['birth_outcome_dalys'], 'n_deliveries'),
+        'n_ptb':         _endpoint_sum(r, ['birth_outcome_dalys'], 'n_ptb'),
+        'n_lbw':         _endpoint_sum(r, ['birth_outcome_dalys'], 'n_lbw'),
+        'n_stillbirths': _endpoint_sum(r, ['birth_outcome_dalys'], 'n_stillbirths'),
+        'dalys':         _endpoint_sum(r, ['birth_outcome_dalys'], 'dalys'),
+        # Epi endpoints (last-year values)
+        'hiv_prev_final':  float(r['hiv']['prevalence'].values[-1]) if 'hiv' in r else float('nan'),
+        'syph_prev_final': float(r['syph']['prevalence_f'].values[-1]) if 'syph' in r else float('nan'),
+        'ng_prev_final':   float(r['ng']['prevalence_f'].values[-1]) if 'ng' in r else float('nan'),
+        'ct_prev_final':   float(r['ct']['prevalence_f'].values[-1]) if 'ct' in r else float('nan'),
+        'tv_prev_final':   float(r['tv']['prevalence_f'].values[-1]) if 'tv' in r else float('nan'),
+    }
+
+
+def run_one(task):
+    draw_idx, seed, scenario_id, assumption_id, row = task
+    try:
+        sim = build_scenario_sim(
+            seed=seed, scenario_id=scenario_id,
+            assumption_id=assumption_id, draw_row=row,
+            start=START, stop=STOP, n_agents=N_AGENTS,
+        )
+        sim.run()
+        return extract_scalars(sim, scenario_id, assumption_id, draw_idx, seed)
+    except Exception as e:
+        import traceback
+        return {'draw_idx': int(draw_idx), 'seed': int(seed),
+                 'scenario_id': scenario_id, 'assumption_id': assumption_id,
+                 'error': f'{type(e).__name__}: {e}',
+                 'traceback': traceback.format_exc()}
+
+
+def main():
+    draws = pd.read_csv(DRAWS_CSV).head(N_DRAWS)
+    tasks = []
+    for _, row in draws.iterrows():
+        d = int(row['draw_idx'])
+        for sub in range(N_SEEDS):
+            seed = d * 1000 + sub
+            for sc_id in INTERVENTION_SCENARIOS.keys():
+                for ax_id in EFFECT_SIZE_ASSUMPTIONS.keys():
+                    tasks.append((d, seed, sc_id, ax_id, row.to_dict()))
+
+    print(f'Grid: {len(draws)} draws × {N_SEEDS} seeds × '
+          f'{len(INTERVENTION_SCENARIOS)} scenarios × '
+          f'{len(EFFECT_SIZE_ASSUMPTIONS)} assumptions = {len(tasks)} sims '
+          f'| workers={N_WORKERS}')
+
+    t0 = time.time()
+    out_path = RESULTS / 'scenarios.jsonl'
+    with open(out_path, 'w') as f, mp.Pool(N_WORKERS) as pool:
+        for i, row_out in enumerate(pool.imap(run_one, tasks, chunksize=1)):
+            f.write(json.dumps(row_out) + '\n')
+            f.flush()
+            if (i+1) % 10 == 0 or i+1 == len(tasks):
+                elapsed = time.time() - t0
+                rate = (i+1) / elapsed
+                eta = (len(tasks) - i - 1) / rate if rate > 0 else float('inf')
+                print(f'  {i+1}/{len(tasks)} sims done '
+                      f'({elapsed:.0f}s, {rate:.2f} sims/s, ETA {eta/60:.1f} min)',
+                      flush=True)
+
+    print(f'Done: {len(tasks)} sims in {time.time()-t0:.0f}s. Wrote {out_path}.')
 
 
 if __name__ == '__main__':
-
-    n_pars       = 10
-    seeds_per_par = 5
-    stop         = 2040
-
-    all_dfs = []
-    for scenario in scenarios:
-        sc.heading(f'Running scenario: {scenlabels[scenario]}')
-        sims = run_scenario(scenario=scenario, n_pars=n_pars,
-                           seeds_per_par=seeds_per_par, stop=stop)
-        df = save_scenario_results(sims, scenario)
-        all_dfs.append(df)
-
-    # Combine all scenarios
-    combined = pd.concat(all_dfs, ignore_index=True)
-    sc.saveobj(f'{RESULTS_DIR}/all_scenarios.df', combined)
-    print(f'\nSaved combined results: {len(combined)} rows')
-    print('Done!')
+    sys.exit(main())

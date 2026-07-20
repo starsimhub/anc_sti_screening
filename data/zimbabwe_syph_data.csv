@@ -1,0 +1,8 @@
+time,syph.prevalence_f,syph.prevalence_m,syph.serological_prevalence_f,syph.serological_prevalence_m,syph.pregnant_prevalence,syph_hiv_coinfection.syph_prev_has_hiv,syph_hiv_coinfection.syph_prev_no_hiv
+1995,,,,,0.022,,
+2000,,,,,0.021,,
+2005,,,,,0.020,,
+2010,,,,,0.019,,
+2015,,,,,0.018,,
+2016,0.010,0.006,0.030,0.024,,0.029,0.004
+2020,,,,,0.017,,

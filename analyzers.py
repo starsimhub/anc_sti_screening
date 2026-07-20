@@ -4,6 +4,7 @@ Analyzers for the ANC STI screening model.
 Custom result tracking beyond the standard disease/intervention outputs.
 """
 
+from collections import defaultdict
 import numpy as np
 import sciris as sc
 import starsim as ss
@@ -131,20 +132,23 @@ class pregnancy_sti_stats(ss.Analyzer):
 
 class birth_outcome_dalys(ss.Analyzer):
     """
-    Compute DALYs from adverse birth outcomes (PTB and LBW) each timestep.
+    DALYs from adverse birth outcomes, reconciled per-birth at delivery.
 
-    Reads classification flags from the FetalHealth module at the point of
-    delivery and applies disability weights and durations. Parameters are
-    exposed so they can be varied across VoI draws.
+    Reads exact per-newborn PTB/LBW flags in a Pregnancy delivery callback,
+    which lets us count PTB-only, LBW-only, and PTB+LBW separately without
+    approximation. Syph stillbirths come from `syph.cs_outcome == 2`
+    (module's own new_stillborns counter is broken by a step()-clears-before-
+    update_results timing bug — see reference_stisim_syph_ti_stillborn_timing_bug).
 
-    YLD = n_ptb * dw_ptb * dur_ptb  +  n_lbw_only * dw_lbw * dur_lbw
-
-    PTB+LBW co-occurrences accrue the higher disability weight (PTB) only,
-    to avoid double-counting.
+    YLD accounting:
+      n_ptb  = n_ptb_only + n_ptb_and_lbw
+      n_lbw  = n_lbw_only + n_ptb_and_lbw
+      yld_ptb = n_ptb * dw_ptb * dur_ptb        # co-occurring PTB+LBW takes PTB weight
+      yld_lbw = n_lbw_only * dw_lbw * dur_lbw   # term-SGA-LBW only
 
     Args:
-        dw_ptb  (float): disability weight for preterm birth (default GBD 2019: 0.15)
-        dw_lbw  (float): disability weight for LBW without PTB (default GBD 2019: 0.10)
+        dw_ptb  (float): disability weight for preterm birth (GBD 2019: 0.15)
+        dw_lbw  (float): disability weight for LBW without PTB (GBD 2019: 0.10)
         dur_ptb (float): DALY accrual duration in years for PTB (default: 1.0)
         dur_lbw (float): DALY accrual duration in years for LBW (default: 1.0)
         start   (float): year from which to start accumulating DALYs
@@ -163,61 +167,64 @@ class birth_outcome_dalys(ss.Analyzer):
         super().init_pre(sim)
         if self.start is None:
             self.start = sim.t.yearvec[0]
+        self._pregnancy = sim.demographics.pregnancy
+        self._fh = sim.custom['fetal_health']
+        self._syph = sim.diseases.get('syph')
+        self._pregnancy.add_delivery_callback(self._on_delivery)
+
+    def step(self):
+        return
 
     def init_results(self):
         super().init_results()
         self.define_results(
-            ss.Result('n_deliveries',  dtype=int,   label='Deliveries'),
-            ss.Result('n_ptb',         dtype=int,   label='Preterm births'),
-            ss.Result('n_lbw',         dtype=int,   label='LBW births'),
-            ss.Result('n_ptb_lbw',     dtype=int,   label='PTB + LBW'),
-            ss.Result('yld_ptb',       scale=False, label='YLD — preterm birth'),
-            ss.Result('yld_lbw',       scale=False, label='YLD — LBW only'),
-            ss.Result('dalys',         scale=False, label='DALYs'),
-            ss.Result('cum_dalys',     scale=False, label='Cumulative DALYs'),
+            ss.Result('n_deliveries',   dtype=int,   label='Deliveries'),
+            ss.Result('n_ptb',          dtype=int,   label='Preterm births'),
+            ss.Result('n_lbw',          dtype=int,   label='LBW births'),
+            ss.Result('n_ptb_only',     dtype=int,   label='PTB without LBW'),
+            ss.Result('n_lbw_only',     dtype=int,   label='LBW without PTB (term SGA)'),
+            ss.Result('n_ptb_and_lbw',  dtype=int,   label='PTB and LBW'),
+            ss.Result('n_stillbirths',  dtype=int,   label='Stillbirths (syph)'),
+            ss.Result('yld_ptb',        label='YLD — preterm birth'),
+            ss.Result('yld_lbw',        label='YLD — LBW only'),
+            ss.Result('dalys',          label='DALYs'),
+            ss.Result('cum_dalys',      label='Cumulative DALYs'),
         )
 
-    def step(self):
-        sim = self.sim
-        ti  = self.ti
-
-        if sim.t.yearvec[ti] < self.start:
+    def _on_delivery(self, mother_uids, newborn_uids):
+        if self.sim.t.yearvec[self.ti] < self.start:
             return
-
-        try:
-            fh = sim.custom['fetal_health']
-        except (KeyError, AttributeError):
+        if not len(newborn_uids):
             return
+        ti = self.ti
 
-        preg = sim.people.pregnancy
-        # Pregnancy.step() clears pregnant before analyzers run; just-delivered women
-        # are identified by ti_delivery == ti and not pregnant
-        delivering = (preg.ti_delivery == ti) & ~preg.pregnant
-        if not delivering.any():
-            return
+        is_ptb = self._pregnancy.preterm[newborn_uids]
+        is_lbw = self._fh.lbw[newborn_uids]
+        ptb_only    = is_ptb & ~is_lbw
+        lbw_only    = is_lbw & ~is_ptb
+        ptb_and_lbw = is_ptb & is_lbw
 
-        uids = delivering.uids
-        is_ptb = np.asarray(fh.is_preterm[uids], dtype=bool)
-        is_lbw = np.asarray(fh.is_lbw[uids], dtype=bool)
+        n_ptb_only    = int(ptb_only.sum())
+        n_lbw_only    = int(lbw_only.sum())
+        n_ptb_and_lbw = int(ptb_and_lbw.sum())
+        n_ptb = n_ptb_only + n_ptb_and_lbw
+        n_lbw = n_lbw_only + n_ptb_and_lbw
 
-        n_ptb     = int(np.sum(is_ptb))
-        n_lbw     = int(np.sum(is_lbw))
-        n_ptb_lbw = int(np.sum(is_ptb & is_lbw))
+        n_still = int((self._syph.cs_outcome[newborn_uids] == 2).sum()) if self._syph is not None else 0
 
-        # Avoid double-counting: LBW-only accrues dw_lbw; PTB accrues dw_ptb regardless
-        n_lbw_only = n_lbw - n_ptb_lbw
-
-        yld_ptb = n_ptb     * self.dw_ptb * self.dur_ptb
+        yld_ptb = n_ptb      * self.dw_ptb * self.dur_ptb
         yld_lbw = n_lbw_only * self.dw_lbw * self.dur_lbw
-        dalys   = yld_ptb + yld_lbw
 
-        self.results['n_deliveries'][ti] = len(uids)
-        self.results['n_ptb'][ti]        = n_ptb
-        self.results['n_lbw'][ti]        = n_lbw
-        self.results['n_ptb_lbw'][ti]    = n_ptb_lbw
-        self.results['yld_ptb'][ti]      = yld_ptb
-        self.results['yld_lbw'][ti]      = yld_lbw
-        self.results['dalys'][ti]        = dalys
+        self.results['n_deliveries'][ti]  += len(newborn_uids)
+        self.results['n_ptb'][ti]         += n_ptb
+        self.results['n_lbw'][ti]         += n_lbw
+        self.results['n_ptb_only'][ti]    += n_ptb_only
+        self.results['n_lbw_only'][ti]    += n_lbw_only
+        self.results['n_ptb_and_lbw'][ti] += n_ptb_and_lbw
+        self.results['n_stillbirths'][ti] += n_still
+        self.results['yld_ptb'][ti]       += yld_ptb
+        self.results['yld_lbw'][ti]       += yld_lbw
+        self.results['dalys'][ti]         += yld_ptb + yld_lbw
 
     def finalize(self):
         super().finalize()
@@ -366,3 +373,297 @@ def make_analyzers(extra_analyzers=None):
     if extra_analyzers is not None:
         analyzers += sc.tolist(extra_analyzers)
     return analyzers
+
+
+class SyphTransmissionEvents(ss.Analyzer):
+    """Aggregate syph transmission counts for Lorenz + transmission matrix.
+
+    Args:
+        events_window: (year_start, year_end) for the transmission matrix
+            aggregation. Per-source counts always cover the full sim.
+        name: analyzer name (default 'syph_transmission_events')
+    """
+
+    def __init__(self, events_window=(2010, 2025), name='syph_transmission_events',
+                 *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.name = name
+        self.events_window = events_window
+        self.src_count = defaultdict(int)
+        self.matrix = defaultdict(int)
+        self.by_year = defaultdict(lambda: defaultdict(int))
+        return
+
+    def init_post(self):
+        super().init_post()
+        sim = self.sim
+        # The model may not have syph (e.g. discharging-only runs); be defensive
+        if not hasattr(sim.diseases, 'syph'):
+            return
+        syph = sim.diseases.syph
+        nw = sim.networks.structuredsexual
+        ppl = sim.people
+        original = syph.set_prognoses
+        src_count = self.src_count
+        matrix = self.matrix
+        by_year = self.by_year
+        events_lo, events_hi = self.events_window
+
+        def categorize(uid):
+            if ppl.female[uid]:
+                return 'F_fsw' if nw.fsw[uid] else 'F_other'
+            return 'M_client' if nw.client[uid] else 'M_other'
+
+        def stage_of(uid):
+            if syph.primary[uid]: return 'primary'
+            if syph.secondary[uid]: return 'secondary'
+            if syph.early[uid]: return 'early_latent'
+            if syph.late[uid]: return 'late_latent'
+            return 'unknown'
+
+        def instrumented(uids, source_uids=None, ti=None):
+            if source_uids is not None and len(source_uids) > 0:
+                cti = ti if ti is not None else syph.ti
+                try:
+                    year = int(syph.t.timevec[cti].year)
+                except Exception:
+                    year = -1
+                src_arr = np.atleast_1d(source_uids)
+                dst_arr = np.atleast_1d(uids)
+                in_window = events_lo <= year < events_hi
+                for s, d in zip(src_arr, dst_arr):
+                    src_count[int(s)] += 1
+                    if in_window:
+                        key = (categorize(s), categorize(d), stage_of(s))
+                        matrix[key] += 1
+                        by_year[year][key] += 1
+            return original(uids, source_uids, ti)
+
+        syph.set_prognoses = instrumented
+        return
+
+    def step(self):
+        # All work happens in the monkey-patched set_prognoses.
+        return
+
+    def as_dict(self):
+        """Serializable snapshot for outputs."""
+        return {
+            'src_count': dict(self.src_count),
+            'matrix': {f'{k[0]}|{k[1]}|{k[2]}': v
+                       for k, v in self.matrix.items()},
+            'by_year': {str(y): {f'{k[0]}|{k[1]}|{k[2]}': v
+                                  for k, v in d.items()}
+                        for y, d in self.by_year.items()},
+            'events_window': list(self.events_window),
+        }
+
+
+class CareTimingAnalyzer(ss.Analyzer):
+    """Per-episode "treated within N months of acquisition" metric, for
+    one or more windows simultaneously (3mo + 6mo, etc.).
+
+    Stricter than ``tx_success / new_inf`` (which counts ALL successful
+    treatments and ALL new infections in window — re-infections inflate
+    both num and denom, and treatments of pre-window infections inflate
+    only the numerator). This metric is per-episode:
+
+      ``{d}_inf_treated_within_{N}mo`` = "agent was newly infected at
+      time T then successfully treated within N months of T".
+
+    For each disease tracks a per-agent ``ti_last_inf`` (overwritten on
+    every new infection event for that agent), then on each step
+    inspects every linked treatment's ``outcomes[disease].successful``
+    uids; for each successful uid checks whether
+    ``(ti - ti_last_inf) <= window_steps_N`` for each window N. If yes,
+    increments the corresponding result. A cure at 4 months counts for
+    the 6mo result but not the 3mo result.
+
+    Args:
+        disease_names: list of disease names to track.
+        treatment_disease_map: dict mapping treatment intervention name
+            to disease name.
+        windows_months: list of cure-timing windows in months
+            (default [3, 6]).
+        name: analyzer name (default 'care_timing').
+
+    Reads:
+        sim.diseases[d].ti_infected per step.
+        sim.interventions[tx].outcomes[d].successful per step.
+
+    Writes (per disease, per window):
+        results[f'{d}_inf_treated_within_{N}mo'], indexed by the
+        timestep on which the CURE happened. Sum over window for the
+        numerator; pair with sim.results[d].new_infections for the
+        denominator.
+
+    Backwards-compat: accepts ``window_months=`` (singular) as well;
+    converted to a one-element list internally.
+    """
+    def __init__(self, disease_names, treatment_disease_map,
+                 windows_months=None, window_months=None,
+                 name='care_timing', *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.name = name
+        self.disease_names = list(disease_names)
+        self.treatment_disease_map = dict(treatment_disease_map)
+        if windows_months is None and window_months is not None:
+            windows_months = [int(window_months)]
+        if windows_months is None:
+            windows_months = [3, 6]
+        self.windows_months = [int(w) for w in windows_months]
+        states = [ss.FloatArr(f'{d}_ti_last_inf', default=np.nan)
+                  for d in self.disease_names]
+        self.define_states(*states)
+
+    def init_results(self):
+        super().init_results()
+        results = sc.autolist()
+        for d in self.disease_names:
+            for w in self.windows_months:
+                results += [
+                    ss.Result(f'{d}_inf_treated_within_{w}mo', dtype=int,
+                              label=(f'{d} infections treated within '
+                                     f'{w}mo of acquisition'),
+                              auto_plot=False),
+                ]
+        self.define_results(*results)
+
+    def step(self):
+        sim = self.sim
+        ti = self.ti
+        dt_year = sim.t.dt_year if sim.t.dt_year else 1/12
+        window_steps = {w: max(1, int(round(w / 12.0 / dt_year)))
+                        for w in self.windows_months}
+
+        # 1. Update ti_last_inf for agents newly infected this step.
+        for d in self.disease_names:
+            disease = sim.diseases.get(d)
+            if disease is None:
+                continue
+            ti_arr = getattr(self, f'{d}_ti_last_inf')
+            new_inf = (disease.ti_infected == ti).uids
+            if len(new_inf):
+                ti_arr[new_inf] = ti
+
+        # 2. For each tracked treatment, check window membership.
+        for tx_name, d in self.treatment_disease_map.items():
+            tx = sim.interventions.get(tx_name)
+            if tx is None:
+                continue
+            outcomes = getattr(tx, 'outcomes', None)
+            if outcomes is None:
+                continue
+            disease_out = outcomes.get(d) if hasattr(outcomes, 'get') else None
+            if disease_out is None:
+                continue
+            succ = disease_out.get('successful') if hasattr(disease_out, 'get') \
+                   else getattr(disease_out, 'successful', None)
+            if succ is None or len(succ) == 0:
+                continue
+            ti_arr = getattr(self, f'{d}_ti_last_inf')
+            last_inf = ti_arr[succ]
+            valid = ~np.isnan(last_inf)
+            gap = ti - last_inf
+            for w, n_steps in window_steps.items():
+                in_window = valid & (gap <= n_steps)
+                n_in = int(in_window.sum())
+                if n_in:
+                    self.results[f'{d}_inf_treated_within_{w}mo'][ti] += n_in
+        return
+
+
+class birth_outcome_attribution(ss.Analyzer):
+    """
+    Per-disease attribution of adverse birth outcomes.
+
+    PTB and LBW get per-disease attribution across all four covered diseases
+    (NG / CT / TV / syph), including sole vs shared columns. Stillbirth and
+    NND are syph-only (`sti.Syphilis` is the only module that emits them in
+    this model; NG/CT/TV → stillbirth/NND is a known model gap).
+
+    At delivery, reads `sti_fetal.exposed_<disease>[mother]` alongside
+    per-newborn PTB/LBW flags from Pregnancy/FetalHealth and syph-newborn
+    ti_stillborn/ti_nnd, tallying counts against the current ti.
+
+    Rows sum to ≥ n_ABO because a birth with multiple exposures is counted
+    under each contributing disease; the sole/shared columns disambiguate.
+    """
+
+    def __init__(self, diseases=('ng', 'ct', 'tv', 'syph'), start=None, **kwargs):
+        super().__init__(**kwargs)
+        self.name = 'birth_outcome_attribution'
+        self.diseases = list(diseases)
+        self.start = start
+        return
+
+    def init_pre(self, sim):
+        super().init_pre(sim)
+        if self.start is None:
+            self.start = sim.t.yearvec[0]
+        self._sti_fetal = sim.custom.get('sti_fetal') if hasattr(sim, 'custom') else None
+        if self._sti_fetal is None:
+            raise ValueError('birth_outcome_attribution requires sti_fetal in sim.custom.')
+        self._pregnancy = sim.demographics.pregnancy
+        self._fh = sim.custom['fetal_health']
+        self._syph = sim.diseases.get('syph')
+        self._pregnancy.add_delivery_callback(self._on_delivery)
+        return
+
+    def step(self):
+        return
+
+    def init_results(self):
+        super().init_results()
+        results = sc.autolist()
+        for outcome in ('ptb', 'lbw'):
+            for d in self.diseases:
+                results += ss.Result(f'n_{outcome}_{d}', dtype=int, label=f'{outcome.upper()} attributed to {d.upper()}')
+                results += ss.Result(f'n_{outcome}_sole_{d}', dtype=int, label=f'{outcome.upper()} solely {d.upper()}')
+                results += ss.Result(f'n_{outcome}_shared_{d}', dtype=int, label=f'{outcome.upper()} co-attributed with {d.upper()}')
+            results += ss.Result(f'n_{outcome}_no_attribution', dtype=int, label=f'{outcome.upper()} with no STI exposure')
+        results += ss.Result('n_stillbirth_syph', dtype=int, label='Syph-attributable stillbirths')
+        results += ss.Result('n_nnd_syph', dtype=int, label='Syph-attributable neonatal deaths')
+        self.define_results(*results)
+        return
+
+    def _on_delivery(self, mother_uids, newborn_uids):
+        if self.sim.t.yearvec[self.ti] < self.start:
+            return
+        if not len(newborn_uids):
+            return
+        ti = self.ti
+
+        is_ptb = self._pregnancy.preterm[newborn_uids]
+        is_lbw = self._fh.lbw[newborn_uids]
+        if self._syph is not None:
+            cs = self._syph.cs_outcome[newborn_uids]
+            is_syph_stillborn = cs == 2
+            is_syph_nnd = cs == 1
+        else:
+            is_syph_stillborn = np.zeros(len(newborn_uids), dtype=bool)
+            is_syph_nnd = np.zeros(len(newborn_uids), dtype=bool)
+
+        parents = self.sim.people.parent[newborn_uids]
+        exposure = {}
+        for d in self.diseases:
+            arr = getattr(self._sti_fetal, f'exposed_{d}', None)
+            exposure[d] = arr[parents] if arr is not None else np.zeros(len(newborn_uids), dtype=bool)
+        n_exposures = np.sum(list(exposure.values()), axis=0)
+
+        for outcome_name, outcome_mask in (('ptb', is_ptb), ('lbw', is_lbw)):
+            for d in self.diseases:
+                mask_d = exposure[d]
+                self.results[f'n_{outcome_name}_{d}'][ti] += int((outcome_mask & mask_d).sum())
+                self.results[f'n_{outcome_name}_sole_{d}'][ti] += int((outcome_mask & mask_d & (n_exposures == 1)).sum())
+                self.results[f'n_{outcome_name}_shared_{d}'][ti] += int((outcome_mask & mask_d & (n_exposures > 1)).sum())
+            self.results[f'n_{outcome_name}_no_attribution'][ti] += int((outcome_mask & (n_exposures == 0)).sum())
+
+        self.results['n_stillbirth_syph'][ti] += int(is_syph_stillborn.sum())
+        self.results['n_nnd_syph'][ti] += int(is_syph_nnd.sum())
+
+        for d in self.diseases:
+            arr = getattr(self._sti_fetal, f'exposed_{d}', None)
+            if arr is not None:
+                arr[mother_uids] = False
+        return

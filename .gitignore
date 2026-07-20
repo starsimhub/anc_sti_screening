@@ -5,15 +5,18 @@ __pycache__/
 dist/
 build/
 
-# Results (large binary files)
+# Results (large binary + regenerable files)
 results/*.obj
 results/*.df
 results/*.zip
+results/*.pkl
+results/*.parquet
+results/scenarios.jsonl
 
 # Figures (regenerable)
-figures/*.png
-figures/*.pdf
-figures/*.svg
+figures/**/*.png
+figures/**/*.pdf
+figures/**/*.svg
 
 # IDE
 .idea/

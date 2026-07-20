@@ -2,8 +2,13 @@
 
 Agent-based model for evaluating antenatal care (ANC) screening strategies for asymptomatic bacterial STIs during pregnancy in Zimbabwe, built on [STIsim](https://github.com/starsimhub/stisim) / [Starsim](https://github.com/starsimhub/starsim).
 
+Calibration + intervention infrastructure is ported from the sibling repo `sti_notification`. This project uses the ported calibrated ensemble; it does NOT re-run the calibration itself. Current work is on branch `port/stinotif-calibration`.
+
+**Read `HANDOFF.md` first.** As of 2026-07-13 the 700-sim full grid has completed but the user is not yet convinced by the numbers. Known model/analyzer issues (prenatal stillbirth counter, stochastic extinction, congenital-outcome semantics) are documented there — approach with skepticism before writing anything up.
+
 ## Diseases modeled
 - HIV
+- Syphilis (with GUD-placeholder for non-syphilitic genital ulcer)
 - Gonorrhea (NG)
 - Chlamydia (CT)
 - Trichomoniasis (TV)
@@ -13,57 +18,99 @@ Agent-based model for evaluating antenatal care (ANC) screening strategies for a
 
 ```
 anc_sti_screening/
-├── data/                      Zimbabwe demographic + epidemiological input data
-├── results/                   Calibration outputs, scenario results
+├── data/                      Zimbabwe demographic + epi data + calibration_draws.csv
+├── results/                   Scenario outputs (gitignored beyond a small kavg CSV)
 ├── figures/                   Generated plots
-├── assets/                    Fonts
-├── model.py                   Sim construction (make_sim, make_diseases, make_hiv_intvs)
-├── interventions.py           SyndromicMgmt (VDS/UDS) + ANCScreen intervention
-├── analyzers.py               total_symptomatic, pregnancy_sti_stats
-├── fetal_health.py            FetalHealth module: dynamic birth weight + PTB modeling
-├── connectors.py              sti_fetal connector: routes infections/treatments to FetalHealth
-├── utils.py                   Plotting helpers, scenario definitions
-├── run_calibrations.py        Optuna calibration (v15 API, dot notation)
-├── run_msim.py                Multi-sim with top calibrated parameter sets
-├── run_scenarios.py           Compare ANC screening scenarios
-├── plot_hiv_calibration.py    HIV calibration validation figure
-├── plot_network.py            Network structure figure
-└── plot_sti_epi.py            STI prevalence by age/sex + time series
-```
-
-## Pipeline
-
-```
-1. run_calibrations.py     Calibrate HIV + NG/CT/TV to Zimbabwe data (2000 trials)
-2. run_msim.py             Run top 200 pars → percentile stats for validation
-3. plot_hiv_calibration.py Validate HIV fit
-   plot_sti_epi.py         Validate STI fit (prevalence by age/sex + time series)
-   plot_network.py         Validate network structure
-4. run_scenarios.py        Compare SOC vs ANC screening scenarios
-                           FetalHealth module dynamically tracks birth outcomes
+├── docs/                      Design spec + implementation plan (superpowers/)
+├── model.py                   make_sim_parts / make_sim (Zimbabwe sim factory)
+├── interventions.py           SyphilisANCTimer, make_syph_testing, make_testing,
+│                              make_pn, CareSeekScaler, DxRiskRedux, ANCScreen
+├── connectors.py              sti_fetal — routes STI events to FetalHealth
+├── analyzers.py               birth_outcome_dalys, SyphTransmissionEvents,
+│                              CareTimingAnalyzer
+├── pn.py                      Edge-stratified PartnerNotification base class
+├── hiv_model.py               HIV disease + interventions
+├── apply_draw.py              row_to_sim_pars, set_pars_local for calibration draws
+├── scenarios.py               INTERVENTION_SCENARIOS × EFFECT_SIZE_ASSUMPTIONS +
+│                              build_scenario_sim factory
+├── run_scenarios.py           Multiprocessing dispatch of the scenario grid
+├── aggregate_scenarios.py     Assemble K-avg CSV + timeseries/snapshot parquets
+├── quick_validate.py          Small-N smoke test with rich diagnostics
+├── smoke_test_reproducibility.py  Verify sti_notification calibration reproduction
+└── plot_*.py                  Figure scripts (adapted from sti_notification)
 ```
 
 ## Scenarios
 
-| Scenario | Screening | Research question |
-|----------|-----------|-------------------|
-| `soc` | Syndromic management only | Baseline |
-| `anc_all` | ANC screen for NG + CT + TV | Pathogen priority |
-| `anc_ng_only` | ANC screen for NG only | Pathogen priority |
-| `anc_ng_ct` | ANC screen for NG + CT | Pathogen priority |
+7 intervention cells × 4 effect-size assumption sets (see `scenarios.py`):
 
-## Dependencies
+| Scenario ID          | Screening                    |
+| -------------------- | ---------------------------- |
+| `soc`                | Syndromic + syph RPR only    |
+| `anc_1screen_50cov`  | 1 ANC screen, 0-24w, 50% cov |
+| `anc_1screen_75cov`  | 1 ANC screen, 0-24w, 75% cov |
+| `anc_1screen_90cov`  | 1 ANC screen, 0-24w, 90% cov |
+| `anc_2screen_50cov`  | + 3rd tri screen (30-36w), 50% cov |
+| `anc_2screen_75cov`  | + 3rd tri screen (30-36w), 75% cov |
+| `anc_2screen_90cov`  | + 3rd tri screen (30-36w), 90% cov |
 
-- `stisim` (v15 branch)
-- `starsim` (>=3.2.0)
-- `sciris` (>=3.1.6)
-- `pandas`, `numpy`, `scipy`, `optuna`, `seaborn`
+All ANC screens use an NG+CT+TV panel at 95/95 sensitivity/specificity. Syph RPR-at-ANC is always on (SOC).
+
+Effect-size assumption sets: `no_treatment_effect` (ratchet), `central_reversible`, `weak_effects` (lower CIs), `strong_effects` (upper CIs). See docstring at `scenarios.py::EFFECT_SIZE_ASSUMPTIONS`.
 
 ## Usage
 
-```python
-from model import make_sim
+Build a scenario sim directly:
 
-sim = make_sim(scenario='anc_all', n_agents=10000, start=1990, stop=2040)
+```python
+import pandas as pd
+from scenarios import build_scenario_sim
+
+df = pd.read_csv('data/calibration_draws.csv')
+row = df.iloc[0].to_dict()
+sim = build_scenario_sim(
+    seed=int(row['draw_idx']) * 1000,
+    scenario_id='anc_2screen_90cov',
+    assumption_id='central_reversible',
+    draw_row=row, start=1985, stop=2045, n_agents=10_000,
+)
 sim.run()
 ```
+
+Run the full grid (5 draws × 5 seeds × 7 scenarios × 4 assumptions = 700 sims):
+
+```bash
+python run_scenarios.py    # writes results/scenarios.jsonl (~5 MB, gitignored)
+python aggregate_scenarios.py    # writes results/scenarios.kavg.csv (committed, 28 KB)
+```
+
+Wall time ~4.3h on 80 VM workers. Timeseries/snapshot parquets from Task 5.2 of the plan doc are NOT yet emitted by `run_scenarios.py`; extending it would require a rerun.
+
+Fast smoke test:
+
+```bash
+python quick_validate.py    # 3 scenarios, K=1 seed, ~15 min
+```
+
+Syph-in-pregnancy MTCT diagnostic (hot-seed SOC, pooled two seeds):
+
+```bash
+# Run each hot seed with PregnancyLog attached (pickles ~5 MB each,
+# ~8-10 min wall each; results/*.pkl is gitignored).
+python diag_syph_preg.py --seed 343000 --stop 2045 --out results/syph_preg_log_343000.pkl
+python diag_syph_preg.py --seed 343003 --stop 2045 --out results/syph_preg_log_343003.pkl
+
+# Cascade + TREATED / UNTREATED stage×outcome heatmaps, Zim-scaled events/yr.
+python syph_mtct_outcomes.py 2000 2045
+
+# Point-in-time syph stage distribution (adult women + pregnant women).
+python snapshot_syph_stages.py --year 2025
+```
+
+## Dependencies
+
+- `stisim` on branch `rc1.5.9` (PR 505 baseline PN included)
+- `starsim` (>=3.3.0)
+- `sciris` (>=3.1.6)
+- `pandas`, `numpy`, `scipy`
+- Conda env: `starsim`
